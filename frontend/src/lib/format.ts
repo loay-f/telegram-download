@@ -3,6 +3,15 @@ const nf1 = new Intl.NumberFormat("ar-EG", { maximumFractionDigits: 1 });
 
 export const num = (n: number) => nf.format(n);
 
+/** A file name without its extension. Shown next to a type badge; otherwise
+ * ".pdf" renders at the wrong end of right-to-left text. */
+export function stem(name: string, ext: string | null): string {
+  return ext && name.toLowerCase().endsWith(ext) ? name.slice(0, -ext.length) : name;
+}
+
+/** "01:30" -> "٠١:٣٠" */
+export const digits = (s: string) => s.replace(/[0-9]/g, (d) => "٠١٢٣٤٥٦٧٨٩"[Number(d)]);
+
 const UNITS = ["بايت", "ك.ب", "م.ب", "ج.ب", "ت.ب"];
 
 export function bytes(n: number | null | undefined): string {
@@ -40,6 +49,7 @@ export const NOUNS = {
   message: ["رسالة واحدة", "رسالتان", "رسائل", "رسالة"],
   attempt: ["محاولة واحدة", "محاولتان", "محاولات", "محاولة"],
   time: ["مرة واحدة", "مرتان", "مرات", "مرة"],
+  volume: ["جزء واحد", "جزءان", "أجزاء", "جزءاً"],
 } satisfies Record<string, Forms>;
 
 /** Arabic counted noun: "ملف واحد", "ملفان", "٥ ملفات", "١٢ ملفاً". Zero uses the "many" form. */

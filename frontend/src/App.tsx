@@ -11,6 +11,8 @@ import { ChatsPage } from "./pages/Chats";
 import { LibraryPage } from "./pages/Library";
 import { QueuePage } from "./pages/Queue";
 import { SettingsPage } from "./pages/Settings";
+import { SearchPage } from "./pages/Search";
+import { ReaderPage } from "./pages/Reader";
 import { Layout } from "./components/Layout";
 import { Spinner } from "./components/ui";
 
@@ -82,10 +84,12 @@ export default function App() {
       <LiveContext.Provider value={live}>
         <BrowserRouter>
           <Routes>
+            <Route path="read/:id" element={<ReaderPage />} />
             <Route element={<Layout footer={<>متصل باسم <bdi>{account!.me?.name}</bdi></>} />}>
               <Route index element={<Dashboard />} />
               <Route path="chats" element={<ChatsPage />} />
               <Route path="library" element={<LibraryPage />} />
+              <Route path="search" element={<SearchPage />} />
               <Route path="queue" element={<QueuePage />} />
               <Route path="settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />

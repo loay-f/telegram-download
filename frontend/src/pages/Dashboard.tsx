@@ -22,6 +22,7 @@ export function Dashboard() {
   const sentence = engineSentence(status);
   const stopped = engine.paused || engine.state === "disk_full";
   const attention = ["flood_wait", "disk_full", "offline", "waiting_telegram"].includes(engine.state);
+  const limited = engine.speed_limit_kbps > 0;
 
   async function toggle() {
     setBusy(true);
@@ -48,6 +49,9 @@ export function Dashboard() {
           <Button onClick={toggle} busy={busy} variant={stopped ? "primary" : "secondary"} className="text-lg px-6 min-h-12">
             {stopped ? "استئناف التنزيل" : "إيقاف التنزيل مؤقتاً"}
           </Button>
+          {limited && (
+            <span className="text-sm text-ink-soft">السرعة محددة بـ{speed(engine.speed_limit_kbps * 1024)}</span>
+          )}
           {!connected && <span className="text-sm text-ink-soft">انقطع التحديث المباشر، يُعاد الاتصال…</span>}
         </div>
       </section>
@@ -67,6 +71,15 @@ export function Dashboard() {
           note={stats.remaining_bytes > 0 ? `${bytes(stats.remaining_bytes)} متبقية` : undefined}
         />
       </section>
+
+      {stats.status_counts.available > 0 && (
+        <p className="-mt-6">
+          <Link to="/library?view=available" className="text-binding underline underline-offset-4">
+            {count(stats.status_counts.available, NOUNS.file)} متاحة للتنزيل في المكتبة
+          </Link>{" "}
+          <span className="text-ink-soft">— وجدها البرنامج في المحادثات المتابَعة، وتنتظر اختيارك.</span>
+        </p>
+      )}
 
       {(stats.bandwidth_saved_bytes > 0 || stats.repeat_posts > 0) && (
         <p className="text-ink-soft -mt-6">

@@ -62,13 +62,14 @@ class FakeGateway(TelegramGateway):
         self.qr_tokens = 0
         self.qr_lifetime = 30.0
         self.qr_scanned = asyncio.Event()  # tests set it to "scan" the QR
+        self.saved_messages: list[str] = []
         self.scan_calls: list[tuple[int, int]] = []  # (chat_id, min_id)
         self.get_message_calls = 0
         self.always_fail_ids: set[int] = set()  # tg_document_ids whose download always errors
 
     # --- helpers for tests ---
-    def add_chat(self, chat_id: int, title: str, type_: str = "channel") -> FakeChat:
-        self.chats[chat_id] = FakeChat(chat_id, title, type_)
+    def add_chat(self, chat_id: int, title: str, type_: str = "channel", username: str | None = None) -> FakeChat:
+        self.chats[chat_id] = FakeChat(chat_id, title, type_, username)
         return self.chats[chat_id]
 
     def post(self, chat_id: int, msg_id: int, f: FakeFile, caption: str | None = None) -> None:
@@ -173,6 +174,33 @@ class FakeGateway(TelegramGateway):
         if msg_id not in self.chats[chat_id].messages:
             return None
         return self._to_msg(chat_id, msg_id)
+
+    def _dialog(self, chat_id: int) -> DialogInfo:
+        c = self.chats[chat_id]
+        return DialogInfo(c.id, c.title, c.username, c.type)
+
+    async def search_documents(self, query: str, limit: int):
+        self._maybe_flood("search")
+        hits = []
+        for chat in self.chats.values():
+            for msg_id, (f, caption) in sorted(chat.messages.items(), reverse=True):
+                if query.lower() in f.name.lower() or query.lower() in (caption or "").lower():
+                    hits.append((self._to_msg(chat.id, msg_id), self._dialog(chat.id)))
+        return hits[:limit]
+
+    async def resolve_link(self, peer, msg_id: int):
+        if isinstance(peer, str):
+            chat = next((c for c in self.chats.values() if c.username == peer), None)
+        else:
+            chat = self.chats.get(peer)
+        if chat is None or chat.id in self.inaccessible_chats:
+            raise ChatUnavailable(str(peer))
+        if msg_id not in chat.messages:
+            return None
+        return self._to_msg(chat.id, msg_id), self._dialog(chat.id)
+
+    async def send_to_saved(self, text: str) -> None:
+        self.saved_messages.append(text)
 
     async def iter_download(
         self, message: DocMessage, offset: int, request_size: int

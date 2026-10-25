@@ -102,7 +102,10 @@ async def test_downloads_dedup_by_content_and_forward(settings):
         stored = settings.storage_dir / bl[by_tg[10].blob_id].storage_path
         assert stored.read_bytes() == content
         sha = hashlib.sha256(content).hexdigest()
-        assert stored.name == f"{sha}.pdf" and stored.parent.name == sha[:2]
+        assert hashlib.sha256(stored.read_bytes()).hexdigest() == sha
+        # Stored once, in the folder of its chat, under one of its names.
+        rel = stored.relative_to(settings.storage_dir).as_posix()
+        assert rel in ("library/chat/book.pdf", "library/chat/renamed copy.pdf")
         assert not list((settings.storage_dir / "tmp").glob("*.part"))
 
 
@@ -321,7 +324,7 @@ async def test_pause_cancel_and_priority(settings):
         order = [tg for tg, _ in gw.downloads_started]
         assert order[0] == 4 and 2 not in order
         by_tg = {d.tg_document_id: d for d in await all_docs(ctx)}
-        assert by_tg[2].status == DocStatus.SKIPPED
+        assert by_tg[2].status == DocStatus.AVAILABLE  # cancelled: back to the catalog
 
 
 async def test_paused_state_survives_restart(settings):

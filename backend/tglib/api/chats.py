@@ -50,6 +50,7 @@ async def list_chats(q: str = "", refresh: bool = False, ctx: Container = Depend
 
     downloaded = case((Document.status.in_((DocStatus.DONE, DocStatus.DUPLICATE)), 1), else_=0)
     pending = case((Document.status.in_((DocStatus.PENDING, DocStatus.DOWNLOADING)), 1), else_=0)
+    available = case((Document.status == DocStatus.AVAILABLE, 1), else_=0)
     async with ctx.db.read() as s:
         chats = (await s.execute(select(Chat))).scalars().all()
         counts = {
@@ -60,6 +61,7 @@ async def list_chats(q: str = "", refresh: bool = False, ctx: Container = Depend
                     func.count().label("files"),
                     func.sum(downloaded).label("downloaded"),
                     func.sum(pending).label("pending"),
+                    func.sum(available).label("available"),
                 )
                 .join(Document, Document.id == Appearance.document_id)
                 .group_by(Appearance.chat_id)
@@ -91,6 +93,8 @@ async def list_chats(q: str = "", refresh: bool = False, ctx: Container = Depend
                 "files": cnt.files if cnt else 0,
                 "downloaded": int(cnt.downloaded or 0) if cnt else 0,
                 "pending": int(cnt.pending or 0) if cnt else 0,
+                "available": int(cnt.available or 0) if cnt else 0,
+                "auto_download": c.auto_download,
                 "scanning": c.id == scanning,
                 "queued": c.id in queued and c.id != scanning,
             }
@@ -117,6 +121,7 @@ async def set_tracked(chat_id: int, body: TrackIn, ctx: Container = Depends(get_
 class ChatSettingsIn(BaseModel):
     allowed_exts: str | None = None  # null/empty = use global setting
     max_size_mb: int | None = Field(default=None, ge=0)
+    auto_download: bool | None = None  # None = leave unchanged
 
 
 @router.post("/{chat_id}/settings")
@@ -124,9 +129,30 @@ async def chat_settings(chat_id: int, body: ChatSettingsIn, ctx: Container = Dep
     await _chat_or_404(ctx, chat_id)
     async with ctx.db.write() as s:
         chat = await s.get(Chat, chat_id)
-        chat.allowed_exts = clean_exts(body.allowed_exts) if body.allowed_exts else None
-        chat.max_size_mb = body.max_size_mb
+        fields = body.model_fields_set
+        if "allowed_exts" in fields:
+            chat.allowed_exts = clean_exts(body.allowed_exts) if body.allowed_exts else None
+        if "max_size_mb" in fields:
+            chat.max_size_mb = body.max_size_mb
+        if body.auto_download is not None:
+            chat.auto_download = body.auto_download
     return {"ok": True}
+
+
+@router.post("/{chat_id}/download-all")
+async def download_all(chat_id: int, ctx: Container = Depends(get_ctx)):
+    """Queues every file found in this chat that isn't downloaded yet."""
+    await _chat_or_404(ctx, chat_id)
+    async with ctx.db.read() as s:
+        ids = (
+            await s.execute(
+                select(Document.id)
+                .join(Appearance, Appearance.document_id == Document.id)
+                .where(Appearance.chat_id == chat_id, Document.status == DocStatus.AVAILABLE)
+            )
+        ).scalars().all()
+    result = await ctx.engine.request(list(ids))
+    return {"queued": result.queued}
 
 
 @router.post("/{chat_id}/scan")

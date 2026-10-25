@@ -66,9 +66,9 @@ async def test_status_transitions(settings):
         docs = await by_tg(ctx)
         eng = ctx.engine
 
-        # pending -> skipped by cancel; skipped -> pending by retry
+        # pending -> available by cancel; available -> pending by retry
         assert await eng.cancel(docs[1].id)
-        assert (await by_tg(ctx))[1].status == DocStatus.SKIPPED
+        assert (await by_tg(ctx))[1].status == DocStatus.AVAILABLE
         assert not await eng.cancel(docs[1].id)
         assert await eng.retry(docs[1].id)
         assert (await by_tg(ctx))[1].status == DocStatus.PENDING

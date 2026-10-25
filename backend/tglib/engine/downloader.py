@@ -15,7 +15,6 @@ import errno
 import hashlib
 import logging
 import os
-import re
 import shutil
 import time
 from contextlib import aclosing
@@ -25,12 +24,20 @@ from pathlib import Path
 
 from sqlalchemy import func, select, update
 
-from tglib.db.models import Appearance, Blob, Document, DocStatus, Setting, utcnow
+from tglib.db.models import Appearance, Blob, Chat, Document, DocStatus, Setting, utcnow
 from tglib.db.session import Database
 from tglib.engine.account import TelegramAccount
+from tglib.engine.catalog import DELETED, backfill_series, request_download
 from tglib.engine.errors import ChatUnavailable, FileRefExpired, FloodWait, NotAuthorized, NotConnected
 from tglib.engine.events import EventBus
 from tglib.engine.settings_store import SettingsStore
+from tglib.engine.storage import (
+    chat_dir_name,
+    file_name,
+    is_legacy_path,
+    remove_empty_dirs,
+    unique_relpath,
+)
 from tglib.engine.telegram import DocMessage
 
 log = logging.getLogger(__name__)
@@ -44,7 +51,6 @@ MAX_REF_REFRESH = 3
 PAUSED_KEY = "engine_paused"
 
 MSG_NO_SOURCE = "لم يعد الملف متاحاً: حُذفت الرسالة أو لم يعد الوصول إلى المحادثة ممكناً."
-MSG_CANCELLED = "أُلغي يدوياً"
 
 
 class EngineState:
@@ -54,6 +60,7 @@ class EngineState:
     FLOOD_WAIT = "flood_wait"
     DISK_FULL = "disk_full"
     OFFLINE = "offline"
+    SCHEDULED = "scheduled"  # outside the allowed download hours
     WAITING_TELEGRAM = "waiting_telegram"
 
 
@@ -119,12 +126,27 @@ def backoff_seconds(attempts: int) -> int:
     return min(30 * 2 ** max(0, attempts - 1), 3600)
 
 
-_SAFE_EXT = re.compile(r"^\.[a-z0-9]{1,10}$")
+class RateLimiter:
+    """Token bucket shared by all workers. The rate is read on every call,
+    so a new speed limit applies immediately."""
 
+    def __init__(self, rate_bytes_per_s):
+        self._rate = rate_bytes_per_s
+        self._allowance = 0.0
+        self._last = time.monotonic()
+        self._lock = asyncio.Lock()
 
-def blob_relpath(sha: str, ext: str | None) -> str:
-    ext = ext if ext and _SAFE_EXT.match(ext) else ""
-    return f"library/{sha[:2]}/{sha}{ext}"
+    async def take(self, n: int) -> None:
+        rate = self._rate()
+        if rate <= 0:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            self._allowance = min(float(rate), self._allowance + (now - self._last) * rate)
+            self._last = now
+            self._allowance -= n
+            if self._allowance < 0:
+                await asyncio.sleep(-self._allowance / rate)
 
 
 class DownloadEngine:
@@ -154,6 +176,7 @@ class DownloadEngine:
         self._busy: set[int] = set()  # indexes of workers processing a job
         self._supervisor: asyncio.Task | None = None
         self._stopping = False
+        self._limiter = RateLimiter(lambda: self._settings.current.speed_limit_kbps * 1024)
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -166,7 +189,11 @@ class DownloadEngine:
             )
             row = await s.get(Setting, PAUSED_KEY)
             self.paused = bool(row and row.value == "1")
+            filled = await backfill_series(s)
+        if filled:
+            log.info("Computed volume info for %s documents", filled)
         await self._cleanup_tmp()
+        await self._relayout_legacy()
         self._supervisor = asyncio.create_task(self._supervise(), name="download-supervisor")
 
     async def stop(self, grace: float = 8.0) -> None:
@@ -189,7 +216,7 @@ class DownloadEngine:
 
     async def _cleanup_tmp(self) -> None:
         """Delete .part files that no longer belong to a resumable document."""
-        keep_statuses = (DocStatus.PENDING, DocStatus.DOWNLOADING, DocStatus.FAILED)
+        keep_statuses = (DocStatus.AVAILABLE, DocStatus.PENDING, DocStatus.DOWNLOADING, DocStatus.FAILED)
         async with self._db.read() as s:
             keep = set(
                 (
@@ -235,6 +262,8 @@ class DownloadEngine:
         self._publish_state()
 
     async def cancel(self, doc_id: int) -> bool:
+        """Takes a file out of the queue. It stays listed as available and
+        keeps any partial data in case it is requested again."""
         if doc_id in self.active:
             self._cancel.add(doc_id)
             return True
@@ -242,24 +271,51 @@ class DownloadEngine:
             doc = await s.get(Document, doc_id)
             if doc is None or doc.status not in (DocStatus.PENDING, DocStatus.FAILED):
                 return False
-            doc.status = DocStatus.SKIPPED
-            doc.last_error = MSG_CANCELLED
-            await self._unlink_name_duplicates(s, doc.id)
-            tg_id = doc.tg_document_id
-        self._part_path(tg_id).unlink(missing_ok=True)
-        return True
-
-    async def retry(self, doc_id: int) -> bool:
-        async with self._db.write() as s:
-            doc = await s.get(Document, doc_id)
-            if doc is None or doc.status not in (DocStatus.FAILED, DocStatus.SKIPPED):
-                return False
-            doc.status = DocStatus.PENDING
-            doc.attempts = 0
+            doc.status = DocStatus.AVAILABLE
             doc.last_error = None
             doc.next_attempt_at = None
-        self.wake()
         return True
+
+    async def request(self, doc_ids: list[int], *, to_front: bool = False):
+        """Queues documents for download (available, failed, skipped...)."""
+        async with self._db.write() as s:
+            result = await request_download(s, doc_ids, to_front=to_front)
+        if result.queued or to_front:
+            self.wake()
+        return result
+
+    async def retry(self, doc_id: int) -> bool:
+        async with self._db.read() as s:
+            doc = await s.get(Document, doc_id)
+        if doc is None or doc.status not in (DocStatus.FAILED, DocStatus.SKIPPED, DocStatus.AVAILABLE):
+            return False
+        return (await self.request([doc_id])).queued > 0
+
+    async def delete_book(self, doc_id: int) -> str | None:
+        """Removes a downloaded file from disk and the library. Its documents
+        stay known (so rescans do not bring it back) and can be downloaded
+        again from the queue's skipped tab. Returns the content's sha256."""
+        async with self._finalize_lock:
+            async with self._db.write() as s:
+                doc = await s.get(Document, doc_id)
+                if doc is None or doc.blob_id is None:
+                    return None
+                blob = await s.get(Blob, doc.blob_id)
+                await s.execute(
+                    update(Document)
+                    .where(Document.blob_id == blob.id)
+                    .values(
+                        status=DocStatus.SKIPPED, last_error=DELETED, blob_id=None,
+                        duplicate_of_id=None, completed_at=None, bytes_downloaded=0,
+                    )
+                )
+                await s.delete(blob)
+                rel, sha = blob.storage_path, blob.sha256
+            (self.storage_dir / rel).unlink(missing_ok=True)
+            remove_empty_dirs(self.storage_dir, rel)
+        log.info("Deleted %s from the library", rel)
+        self._events.publish("document", {"id": doc_id, "status": DocStatus.SKIPPED})
+        return sha
 
     async def retry_all_failed(self) -> int:
         async with self._db.write() as s:
@@ -293,6 +349,8 @@ class DownloadEngine:
             return EngineState.FLOOD_WAIT
         if self.offline_until > time.time():
             return EngineState.OFFLINE
+        if not self._settings.current.in_download_window():
+            return EngineState.SCHEDULED
         return EngineState.RUNNING if self.active else EngineState.IDLE
 
     def status(self) -> dict:
@@ -304,6 +362,12 @@ class DownloadEngine:
             "flood_wait_seconds": max(0, round(self.flood_until - time.time())),
             "disk_full": self.disk_full,
             "workers": self._settings.current.workers,
+            "speed_limit_kbps": self._settings.current.speed_limit_kbps,
+            "schedule": {
+                "enabled": bool(self._settings.current.schedule_enabled),
+                "start": self._settings.current.schedule_start,
+                "end": self._settings.current.schedule_end,
+            },
             "active": [a.public() for a in self.active.values()],
         }
 
@@ -326,12 +390,26 @@ class DownloadEngine:
             if wait > 0:
                 await asyncio.sleep(min(wait, 5))
                 continue
+            if not self._settings.current.in_download_window():
+                self._wake.clear()
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=30)
+                except asyncio.TimeoutError:
+                    pass
+                continue
             return
 
     def _should_stop(self, doc_id: int) -> str | None:
         if doc_id in self._cancel:
             return "cancel"
-        if self._stopping or self.paused or self.disk_full or self.flood_until > time.time() or not self._account.ready:
+        if (
+            self._stopping
+            or self.paused
+            or self.disk_full
+            or self.flood_until > time.time()
+            or not self._account.ready
+            or not self._settings.current.in_download_window()
+        ):
             return "pause"
         return None
 
@@ -397,8 +475,7 @@ class DownloadEngine:
             await self._finalize(job, part)
         except _Interrupted as e:
             if e.reason == "cancel":
-                await self._release(job, part, status=DocStatus.SKIPPED, error=MSG_CANCELLED)
-                part.unlink(missing_ok=True)
+                await self._release(job, part, status=DocStatus.AVAILABLE)
             else:
                 await self._release(job, part)
         except _Release:
@@ -489,6 +566,7 @@ class DownloadEngine:
                             self._account.gateway.iter_download(source, offset, CHUNK)
                         ) as stream:
                             async for chunk in stream:
+                                await self._limiter.take(len(chunk))
                                 f.write(chunk)
                                 offset += len(chunk)
                                 active.done = offset
@@ -543,7 +621,7 @@ class DownloadEngine:
                     delete_part = True
                     log.info("%s is identical to existing blob %s", job.id, blob.id)
                 else:
-                    rel = blob_relpath(sha, job.ext)
+                    rel = await self._target_path(s, job)
                     dest = self.storage_dir / rel
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     await asyncio.to_thread(os.replace, part, dest)
@@ -567,6 +645,48 @@ class DownloadEngine:
                 part.unlink(missing_ok=True)
         self._events.publish("document", {"id": job.id, "status": status, "name": job.name})
 
+    async def _target_path(self, s, job: Job) -> str:
+        """library/<first chat it was posted in>/<original name>."""
+        first = (
+            await s.execute(
+                select(Chat.id, Chat.title)
+                .join(Appearance, Appearance.chat_id == Chat.id)
+                .where(Appearance.document_id == job.id)
+                .order_by(Appearance.posted_at)
+                .limit(1)
+            )
+        ).first()
+        folder = chat_dir_name(first.title, first.id) if first else "other"
+        name = file_name(job.name, job.ext, f"telegram-{job.tg_document_id}")
+        return unique_relpath(self.storage_dir, folder, name)
+
+    async def _relayout_legacy(self) -> None:
+        """Moves files stored under the old content-hash layout into
+        library/<chat>/<name>."""
+        async with self._db.read() as s:
+            rows = (
+                await s.execute(
+                    select(Blob.id, Blob.storage_path, Document.id, Document.tg_document_id,
+                           Document.original_name, Document.ext)
+                    .join(Document, Document.blob_id == Blob.id)
+                    .where(Document.status == DocStatus.DONE)
+                )
+            ).all()
+        moved = 0
+        for blob_id, old_rel, doc_id, tg_id, name, ext in rows:
+            if not is_legacy_path(old_rel) or not (self.storage_dir / old_rel).is_file():
+                continue
+            async with self._finalize_lock:
+                async with self._db.write() as s:
+                    new_rel = await self._target_path(s, Job(doc_id, tg_id, name, ext, 0, 0, 0))
+                    (self.storage_dir / new_rel).parent.mkdir(parents=True, exist_ok=True)
+                    await asyncio.to_thread(os.replace, self.storage_dir / old_rel, self.storage_dir / new_rel)
+                    await s.execute(update(Blob).where(Blob.id == blob_id).values(storage_path=new_rel))
+                remove_empty_dirs(self.storage_dir, old_rel)
+            moved += 1
+        if moved:
+            log.info("Moved %s files into per-chat folders", moved)
+
     async def _release(
         self, job: Job, part: Path, status: str = DocStatus.PENDING, error: str | None = None
     ) -> None:
@@ -579,8 +699,8 @@ class DownloadEngine:
                 .where(Document.id == job.id, Document.status == DocStatus.DOWNLOADING)
                 .values(**values)
             )
-            if status == DocStatus.SKIPPED:
-                await self._unlink_name_duplicates(s, job.id)
+            if status == DocStatus.AVAILABLE:
+                await self._unlink_name_duplicates(s, job.id, DocStatus.AVAILABLE)
 
     async def _fail(self, job: Job, error: str, permanent: bool = False) -> None:
         attempts = job.attempts + 1
@@ -595,13 +715,14 @@ class DownloadEngine:
                 values["next_attempt_at"] = utcnow() + timedelta(seconds=backoff_seconds(attempts))
             await s.execute(update(Document).where(Document.id == job.id).values(**values))
             if final:
-                await self._unlink_name_duplicates(s, job.id)
+                # The user wanted this content: let its other copies try.
+                await self._unlink_name_duplicates(s, job.id, DocStatus.PENDING)
         log.warning("Download of %s %s: %s", job.id, "failed" if final else "will retry", error)
         if final:
             self._events.publish("document", {"id": job.id, "status": DocStatus.FAILED, "name": job.name})
 
     @staticmethod
-    async def _unlink_name_duplicates(s, doc_id: int) -> None:
+    async def _unlink_name_duplicates(s, doc_id: int, new_status: str) -> None:
         """The original won't be downloaded; its name+size duplicates are
         separate Telegram files and get their own chance."""
         await s.execute(
@@ -611,5 +732,5 @@ class DownloadEngine:
                 Document.blob_id.is_(None),
                 Document.status == DocStatus.DUPLICATE,
             )
-            .values(status=DocStatus.PENDING, duplicate_of_id=None)
+            .values(status=new_status, duplicate_of_id=None)
         )

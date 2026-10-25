@@ -23,6 +23,7 @@ class Base(DeclarativeBase):
 
 
 class DocStatus:
+    AVAILABLE = "available"  # found by a scan; downloaded only when requested
     PENDING = "pending"
     DOWNLOADING = "downloading"
     DONE = "done"
@@ -30,7 +31,7 @@ class DocStatus:
     SKIPPED = "skipped"
     DUPLICATE = "duplicate"
 
-    ALL = (PENDING, DOWNLOADING, DONE, FAILED, SKIPPED, DUPLICATE)
+    ALL = (AVAILABLE, PENDING, DOWNLOADING, DONE, FAILED, SKIPPED, DUPLICATE)
 
 
 class Chat(Base):
@@ -41,6 +42,8 @@ class Chat(Base):
     username: Mapped[str | None] = mapped_column(Text)
     type: Mapped[str | None] = mapped_column(String(16))  # channel / group / user
     tracked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Tracking only scans; with this on, new files are also queued for download.
+    auto_download: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_scanned_msg_id: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_scan_error: Mapped[str | None] = mapped_column(Text)
@@ -80,6 +83,9 @@ class Document(Base):
     # Set when this document was judged a duplicate of another document by
     # name+size before download (the original may not have a blob yet).
     duplicate_of_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"))
+    # Multi-volume works: same series_key, different volume. '' = not a volume.
+    series_key: Mapped[str | None] = mapped_column(Text)
+    volume: Mapped[int | None] = mapped_column(Integer)
     bytes_downloaded: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -95,6 +101,7 @@ class Document(Base):
         Index("ix_documents_normalized_name", "normalized_name"),
         Index("ix_documents_duplicate_of_id", "duplicate_of_id"),
         Index("ix_documents_blob_id", "blob_id"),
+        Index("ix_documents_series_key", "series_key"),
     )
 
 

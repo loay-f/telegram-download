@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, post } from "../lib/api";
 import type { AccountStatus } from "../lib/account";
-import { NOUNS, bytes, count } from "../lib/format";
+import { NOUNS, bytes, count, digits } from "../lib/format";
 import { useAccount } from "../lib/context";
 import { Alert, Button, Panel, ProgressBar, Spinner } from "../components/ui";
 
@@ -11,6 +11,13 @@ interface SettingsData {
   workers: number;
   scan_interval_hours: number;
   max_attempts: number;
+  speed_limit_kbps: number;
+  schedule_enabled: boolean;
+  schedule_start: string;
+  schedule_end: string;
+  timezone: string;
+  summary_enabled: boolean;
+  summary_hour: number;
   library_bytes: number;
   storage: { total: number; free: number; partial_bytes: number; path: string };
   reopened?: number;
@@ -41,6 +48,13 @@ export function SettingsPage() {
   const [workers, setWorkers] = useState(3);
   const [interval, setIntervalH] = useState(6);
   const [attempts, setAttempts] = useState(5);
+  const [limitOn, setLimitOn] = useState(false);
+  const [limitMb, setLimitMb] = useState("2");
+  const [schedOn, setSchedOn] = useState(false);
+  const [schedStart, setSchedStart] = useState("01:00");
+  const [schedEnd, setSchedEnd] = useState("07:00");
+  const [summaryOn, setSummaryOn] = useState(false);
+  const [summaryHour, setSummaryHour] = useState(8);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ kind: "info" | "danger"; text: string } | null>(null);
 
@@ -54,6 +68,13 @@ export function SettingsPage() {
     setWorkers(d.workers);
     setIntervalH(d.scan_interval_hours);
     setAttempts(d.max_attempts);
+    setLimitOn(d.speed_limit_kbps > 0);
+    if (d.speed_limit_kbps > 0) setLimitMb(String(Math.round((d.speed_limit_kbps / 1024) * 10) / 10));
+    setSchedOn(d.schedule_enabled);
+    setSchedStart(d.schedule_start);
+    setSchedEnd(d.schedule_end);
+    setSummaryOn(d.summary_enabled);
+    setSummaryHour(d.summary_hour);
   }
 
   useEffect(() => {
@@ -71,6 +92,14 @@ export function SettingsPage() {
         workers,
         scan_interval_hours: interval,
         max_attempts: attempts,
+        speed_limit_kbps: limitOn ? Math.max(1, Math.round(Number(limitMb) * 1024) || 0) : 0,
+        schedule_enabled: schedOn,
+        schedule_start: schedStart,
+        schedule_end: schedEnd,
+        summary_enabled: summaryOn,
+        summary_hour: summaryHour,
+        // Schedules and the daily summary follow this computer's clock.
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
       });
       apply(d);
       setMessage({
@@ -144,6 +173,69 @@ export function SettingsPage() {
         </label>
       </Panel>
 
+      <Panel title="أوقات التنزيل وسرعته">
+        <div className="space-y-5">
+          <CheckRow
+            checked={schedOn}
+            onChange={setSchedOn}
+            label="نزّل في ساعات محددة فقط"
+            hint="مفيد إن كان الإنترنت أرخص أو أسرع ليلاً. خارج هذه الساعات تنتظر الملفات دورها."
+          />
+          {schedOn && (
+            <div className="flex flex-wrap items-end gap-4 ps-8">
+              <TimeField label="من الساعة" value={schedStart} onChange={setSchedStart} />
+              <TimeField label="إلى الساعة" value={schedEnd} onChange={setSchedEnd} />
+            </div>
+          )}
+          <CheckRow
+            checked={limitOn}
+            onChange={setLimitOn}
+            label="حدّد سرعة التنزيل"
+            hint="حتى يبقى الإنترنت سريعاً لبقية أفراد البيت."
+          />
+          {limitOn && (
+            <label className="block ps-8">
+              <span className="block font-semibold mb-1">أقصى سرعة (ميغابايت في الثانية)</span>
+              <input
+                type="number"
+                min={0.1}
+                step={0.1}
+                value={limitMb}
+                onChange={(e) => setLimitMb(e.target.value)}
+                className="w-32 rounded-lg border border-line bg-white px-3 min-h-11"
+              />
+            </label>
+          )}
+        </div>
+      </Panel>
+
+      <Panel title="ملخص يومي">
+        <div className="space-y-4">
+          <CheckRow
+            checked={summaryOn}
+            onChange={setSummaryOn}
+            label="أرسل لي ملخصاً يومياً في «الرسائل المحفوظة» في تيليغرام"
+            hint="ما نُزّل، وما وُجد من ملفات جديدة، وما لم ينجح تنزيله. لا يُرسل شيء في الأيام الهادئة."
+          />
+          {summaryOn && (
+            <label className="block ps-8">
+              <span className="block font-semibold mb-1">وقت الإرسال</span>
+              <select
+                value={summaryHour}
+                onChange={(e) => setSummaryHour(Number(e.target.value))}
+                className="rounded-lg border border-line bg-white px-3 min-h-11"
+              >
+                {Array.from({ length: 24 }, (_, h) => (
+                  <option key={h} value={h}>
+                    {digits(`${String(h).padStart(2, "0")}:00`)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      </Panel>
+
       <details className="group rounded-xl border border-line bg-white">
         <summary className="cursor-pointer list-none px-5 py-4 text-lg font-semibold flex items-center justify-between">
           إعدادات متقدمة
@@ -193,10 +285,72 @@ export function SettingsPage() {
           الكتب المحفوظة: {bytes(data.library_bytes)}
           {data.storage.partial_bytes > 0 && <> · تنزيلات غير مكتملة: {bytes(data.storage.partial_bytes)}</>}
         </p>
+        <p className="mt-1 text-ink-soft">
+          الكتب محفوظة في مجلد لكل محادثة داخل المجلد <bdi dir="ltr">library</bdi> في مجلد التخزين.
+        </p>
+        <details className="mt-4">
+          <summary className="cursor-pointer text-binding font-semibold">نقل المكتبة إلى قرص آخر</summary>
+          <div className="mt-3 space-y-2 text-ink-soft">
+            <p>
+              مكان التخزين يُحدَّد عند تشغيل البرنامج ولا يمكن تغييره من هنا، لأن البرنامج يعمل داخل Docker ولا يرى
+              إلا المجلد الذي حُدِّد له. لنقل المكتبة:
+            </p>
+            <ol className="list-decimal ps-5 space-y-1">
+              <li>
+                أوقف البرنامج: <bdi dir="ltr" className="font-mono text-ink">docker compose stop</bdi>
+              </li>
+              <li>انسخ مجلد التخزين الحالي كاملاً إلى القرص الجديد، مثلاً <bdi dir="ltr">D:/TGLibrary</bdi>.</li>
+              <li>
+                في ملف <bdi dir="ltr">.env</bdi> غيّر السطر إلى{" "}
+                <bdi dir="ltr" className="font-mono text-ink">STORAGE_HOST_PATH=D:/TGLibrary</bdi>
+              </li>
+              <li>
+                شغّل البرنامج: <bdi dir="ltr" className="font-mono text-ink">docker compose up -d</bdi>
+              </li>
+              <li>بعد التأكد أن الكتب تظهر وتُفتح، احذف المجلد القديم.</li>
+            </ol>
+          </div>
+        </details>
       </Panel>
 
       <AccountPanel />
     </div>
+  );
+}
+
+function CheckRow({ checked, onChange, label, hint }: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  hint?: string;
+}) {
+  return (
+    <label className="flex items-start gap-3 cursor-pointer">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-1 size-5 accent-binding"
+      />
+      <span>
+        <span className="block font-semibold">{label}</span>
+        {hint && <span className="block text-sm text-ink-soft">{hint}</span>}
+      </span>
+    </label>
+  );
+}
+
+function TimeField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <label className="block">
+      <span className="block font-semibold mb-1">{label}</span>
+      <input
+        type="time"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="rounded-lg border border-line bg-white px-3 min-h-11"
+      />
+    </label>
   );
 }
 

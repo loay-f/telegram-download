@@ -32,13 +32,17 @@ async def running_container(
         await ctx.stop()
 
 
-async def track(ctx: Container, chat_id: int, title: str = "chat") -> None:
+async def track(ctx: Container, chat_id: int, title: str = "chat", auto_download: bool = True) -> None:
+    """Tracks a chat. Engine tests want files queued, so auto-download is on
+    by default here (the app's default is off: scan only)."""
     async with ctx.db.write() as s:
         chat = await s.get(Chat, chat_id)
         if chat is None:
-            s.add(Chat(id=chat_id, title=title, type="channel", tracked=True, last_scanned_msg_id=0, is_member=True))
+            s.add(Chat(id=chat_id, title=title, type="channel", tracked=True, auto_download=auto_download,
+                       last_scanned_msg_id=0, is_member=True))
         else:
             chat.tracked = True
+            chat.auto_download = auto_download
 
 
 async def all_docs(ctx: Container) -> list[Document]:

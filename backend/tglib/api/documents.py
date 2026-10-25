@@ -5,7 +5,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import FileResponse
-from sqlalchemy import and_, exists, func, or_, select
+from pydantic import BaseModel
+from sqlalchemy import String, and_, case, cast, exists, func, literal, or_, select
 
 from tglib.api.deps import api_error, get_ctx, require_auth
 from tglib.app.container import Container
@@ -43,7 +44,7 @@ async def _appearances(s, doc_ids: list[int]) -> dict[int, list[dict]]:
         return {}
     rows = await s.execute(
         select(Appearance.document_id, Appearance.chat_id, Appearance.msg_id, Appearance.posted_at,
-               Appearance.caption, Chat.title, Chat.username)
+               Appearance.caption, Chat.title, Chat.username, Chat.type)
         .join(Chat, Chat.id == Appearance.chat_id)
         .where(Appearance.document_id.in_(doc_ids))
         .order_by(Appearance.posted_at)
@@ -57,13 +58,16 @@ async def _appearances(s, doc_ids: list[int]) -> dict[int, list[dict]]:
                 "msg_id": r.msg_id,
                 "posted_at": r.posted_at,
                 "caption": r.caption,
-                "link": _message_link(r.chat_id, r.username, r.msg_id),
+                "link": _message_link(r.chat_id, r.username, r.type, r.msg_id),
             }
         )
     return out
 
 
-def _message_link(chat_id: int, username: str | None, msg_id: int) -> str | None:
+def _message_link(chat_id: int, username: str | None, chat_type: str | None, msg_id: int) -> str | None:
+    """Telegram has message links only for channels and groups."""
+    if chat_type not in ("channel", "group"):
+        return None
     if username:
         return f"https://t.me/{username}/{msg_id}"
     s = str(chat_id)
@@ -126,6 +130,16 @@ async def list_documents(
     }
 
 
+@router.get("/documents/{doc_id}")
+async def get_document(doc_id: int, ctx: Container = Depends(get_ctx)):
+    async with ctx.db.read() as s:
+        d = await s.get(Document, doc_id)
+    if d is None:
+        raise api_error(404, "not_found", "الملف غير موجود.")
+    return {"id": d.id, "name": d.original_name, "ext": d.ext, "size": d.size, "status": d.status,
+            "has_file": d.blob_id is not None}
+
+
 @router.post("/documents/{doc_id}/retry")
 async def retry(doc_id: int, ctx: Container = Depends(get_ctx)):
     if not await ctx.engine.retry(doc_id):
@@ -152,21 +166,43 @@ async def retry_failed(ctx: Container = Depends(get_ctx)):
     return {"count": await ctx.engine.retry_all_failed()}
 
 
+class DownloadIn(BaseModel):
+    ids: list[int]
+    to_front: bool = False  # put ahead of everything already queued
+
+
+@router.post("/documents/download")
+async def download(body: DownloadIn, ctx: Container = Depends(get_ctx)):
+    """Queues picked files (available, failed, skipped) for download."""
+    result = await ctx.engine.request(body.ids[:5000], to_front=body.to_front)
+    return {"queued": result.queued, "already": result.already}
+
+
 # -------------------------------------------------------------- library
-@router.get("/library")
-async def library(
-    q: str = "",
-    ext: str | None = None,
-    chat_id: int | None = None,
-    date_from: datetime | None = None,
-    date_to: datetime | None = None,
-    sort: str = Query("recent", pattern="^(recent|name|size)$"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(30, ge=1, le=100),
-    ctx: Container = Depends(get_ctx),
-):
-    """One entry per stored file (blob); duplicates fold into it."""
-    conds = [Document.blob_id.is_not(None)]
+LIBRARY_VIEWS = {
+    # Downloaded: one entry per stored file; name+size/content duplicates fold in.
+    "downloaded": None,
+    # Found by scans (or search) but not stored yet.
+    "available": (DocStatus.AVAILABLE, DocStatus.PENDING, DocStatus.DOWNLOADING, DocStatus.FAILED),
+}
+
+
+def _work_key(view: str):
+    """Volumes of one series form one work; otherwise each file is its own."""
+    unit = (literal("b:") + cast(Document.blob_id, String)) if view == "downloaded" else (
+        literal("d:") + cast(Document.id, String)
+    )
+    return case(
+        (func.coalesce(Document.series_key, "") != "", literal("s:") + Document.series_key),
+        else_=unit,
+    )
+
+
+def _library_conds(view, q, ext, chat_id, date_from, date_to) -> list:
+    if view == "downloaded":
+        conds = [Document.blob_id.is_not(None)]
+    else:
+        conds = [Document.status.in_(LIBRARY_VIEWS[view])]
     if q.strip():
         conds.append(_text_filter(q))
     if ext:
@@ -180,66 +216,134 @@ async def library(
         app_conds.append(Appearance.posted_at < date_to + timedelta(days=1))
     if app_conds:
         conds.append(exists().where(Appearance.document_id == Document.id, *app_conds))
+    return conds
 
+
+@router.get("/library")
+async def library(
+    view: str = Query("downloaded", pattern="^(downloaded|available)$"),
+    q: str = "",
+    ext: str | None = None,
+    chat_id: int | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    sort: str = Query("recent", pattern="^(recent|name|size)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    ctx: Container = Depends(get_ctx),
+):
+    """Works (a single file, or the volumes of a series) matching the filters."""
+    conds = _library_conds(view, q, ext, chat_id, date_from, date_to)
+    key = _work_key(view).label("key")
+    when = Document.completed_at if view == "downloaded" else Document.first_seen_at
     grouped = (
         select(
-            Document.blob_id.label("blob_id"),
-            func.max(Document.completed_at).label("completed_at"),
-            func.min(Document.original_name).label("name"),
+            key,
+            func.max(when).label("recent"),
+            func.min(Document.normalized_name).label("name"),
+            func.sum(Document.size).label("size"),
         )
         .where(*conds)
-        .group_by(Document.blob_id)
+        .group_by(key)
         .subquery()
     )
     order = {
-        "recent": grouped.c.completed_at.desc(),
+        "recent": grouped.c.recent.desc(),
         "name": grouped.c.name,
-        "size": Blob.size.desc(),
+        "size": grouped.c.size.desc(),
     }[sort]
     async with ctx.db.read() as s:
         total = (await s.execute(select(func.count()).select_from(grouped))).scalar()
-        page_rows = (
+        keys = (
             await s.execute(
-                select(grouped.c.blob_id, Blob.size, Blob.sha256)
-                .join(Blob, Blob.id == grouped.c.blob_id)
-                .order_by(order, grouped.c.blob_id)
-                .offset((page - 1) * page_size)
-                .limit(page_size)
+                select(grouped.c.key).order_by(order, grouped.c.key).offset((page - 1) * page_size).limit(page_size)
+            )
+        ).scalars().all()
+        docs = (
+            (await s.execute(select(Document, key).where(*conds, key.in_(keys)).order_by(Document.id))).all()
+            if keys
+            else []
+        )
+        apps = await _appearances(s, [d.id for d, _ in docs])
+
+    by_key: dict[str, list[Document]] = {}
+    for d, k in docs:
+        by_key.setdefault(k, []).append(d)
+    items = [_work(k, by_key.get(k, []), apps, view) for k in keys]
+    return {"total": total, "page": page, "page_size": page_size, "items": [i for i in items if i]}
+
+
+def _work(key: str, docs: list[Document], apps: dict[int, list[dict]], view: str) -> dict | None:
+    if not docs:
+        return None
+    entries = []
+    if view == "downloaded":
+        by_blob: dict[int, list[Document]] = {}
+        for d in docs:
+            by_blob.setdefault(d.blob_id, []).append(d)
+        for group in by_blob.values():
+            main = next((d for d in group if d.status == DocStatus.DONE), group[0])
+            entries.append(
+                _entry(main, [a for d in group for a in apps.get(d.id, [])])
+                | {
+                    "other_names": sorted({d.original_name for d in group if d.original_name != main.original_name}),
+                    "copies": len(group),
+                    "completed_at": max((d.completed_at for d in group if d.completed_at), default=None),
+                }
+            )
+    else:
+        entries = [_entry(d, apps.get(d.id, [])) for d in docs]
+    entries.sort(key=lambda e: (e["volume"] is None, e["volume"] or 0, e["name"] or ""))
+    chats = sorted({a["chat_title"] or "" for e in entries for a in e["appearances"]})
+    return {
+        "key": key,
+        "series": key.startswith("s:"),
+        "title": entries[0]["name"],
+        "size": sum(e["size"] for e in entries),
+        "chats": chats,
+        "entries": entries,
+    }
+
+
+def _entry(d: Document, appearances: list[dict]) -> dict:
+    appearances = sorted(appearances, key=lambda a: a["posted_at"] or datetime.min)
+    return {
+        "id": d.id,
+        "name": d.original_name,
+        "ext": d.ext,
+        "size": d.size,
+        "status": d.status,
+        "volume": d.volume,
+        "has_file": d.blob_id is not None,
+        "bytes_downloaded": d.bytes_downloaded,
+        "last_error": d.last_error,
+        "first_seen_at": d.first_seen_at,
+        "completed_at": d.completed_at,
+        "caption": next((a["caption"] for a in appearances if a["caption"]), None),
+        "appearances": appearances,
+    }
+
+
+@router.get("/library/chats")
+async def library_chats(ctx: Container = Depends(get_ctx)):
+    """Chats that have files, with how many are downloaded and available."""
+    downloaded = func.count(func.distinct(Document.blob_id))
+    available = func.sum(case((Document.status == DocStatus.AVAILABLE, 1), else_=0))
+    async with ctx.db.read() as s:
+        rows = (
+            await s.execute(
+                select(Chat.id, Chat.title, Chat.type, downloaded.label("downloaded"), available.label("available"))
+                .join(Appearance, Appearance.chat_id == Chat.id)
+                .join(Document, Document.id == Appearance.document_id)
+                .group_by(Chat.id)
+                .order_by(Chat.title)
             )
         ).all()
-        blob_ids = [r.blob_id for r in page_rows]
-        docs = (
-            await s.execute(
-                select(Document).where(Document.blob_id.in_(blob_ids)).order_by(Document.id)
-            )
-        ).scalars().all() if blob_ids else []
-        apps = await _appearances(s, [d.id for d in docs])
-
-    by_blob: dict[int, list[Document]] = {}
-    for d in docs:
-        by_blob.setdefault(d.blob_id, []).append(d)
-    items = []
-    for r in page_rows:
-        group = by_blob.get(r.blob_id, [])
-        main = next((d for d in group if d.status == DocStatus.DONE), group[0] if group else None)
-        if main is None:
-            continue
-        appearances = [a for d in group for a in apps.get(d.id, [])]
-        appearances.sort(key=lambda a: a["posted_at"] or datetime.min)
-        items.append(
-            {
-                "id": main.id,
-                "name": main.original_name,
-                "other_names": sorted({d.original_name for d in group if d.original_name != main.original_name}),
-                "ext": main.ext,
-                "mime": main.mime,
-                "size": r.size,
-                "completed_at": max((d.completed_at for d in group if d.completed_at), default=None),
-                "copies": len(group),
-                "appearances": appearances,
-            }
-        )
-    return {"total": total, "page": page, "page_size": page_size, "items": items}
+    return [
+        {"id": r.id, "title": r.title, "type": r.type, "downloaded": r.downloaded, "available": int(r.available or 0)}
+        for r in rows
+        if r.downloaded or r.available
+    ]
 
 
 @router.get("/library/filters")
@@ -248,32 +352,30 @@ async def library_filters(ctx: Container = Depends(get_ctx)):
     async with ctx.db.read() as s:
         exts = (
             await s.execute(
-                select(Document.ext, func.count(func.distinct(Document.blob_id)))
-                .where(Document.blob_id.is_not(None), Document.ext.is_not(None))
+                select(Document.ext, func.count())
+                .where(Document.ext.is_not(None), Document.status != DocStatus.SKIPPED)
                 .group_by(Document.ext)
-                .order_by(func.count(func.distinct(Document.blob_id)).desc())
+                .order_by(func.count().desc())
             )
         ).all()
-        chats = (
-            await s.execute(
-                select(Chat.id, Chat.title)
-                .where(exists().where(Appearance.chat_id == Chat.id))
-                .order_by(Chat.title)
-            )
-        ).all()
-    return {
-        "exts": [{"ext": e.lstrip("."), "count": c} for e, c in exts],
-        "chats": [{"id": i, "title": t} for i, t in chats],
-    }
+    return {"exts": [{"ext": e.lstrip("."), "count": c} for e, c in exts]}
+
+
+@router.delete("/library/{doc_id}")
+async def delete_book(doc_id: int, ctx: Container = Depends(get_ctx)):
+    sha = await ctx.engine.delete_book(doc_id)
+    if sha is None:
+        raise api_error(404, "not_found", "الكتاب غير موجود في المكتبة.")
+    ctx.thumbs.remove(sha)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- files
-@router.get("/files/{doc_id}")
-async def get_file(doc_id: int, download: bool = False, ctx: Container = Depends(get_ctx)):
+async def _stored_file(ctx: Container, doc_id: int):
     async with ctx.db.read() as s:
         row = (
             await s.execute(
-                select(Document.original_name, Document.mime, Blob.storage_path)
+                select(Document.original_name, Document.mime, Document.ext, Blob.storage_path, Blob.sha256)
                 .join(Blob, Blob.id == Document.blob_id)
                 .where(Document.id == doc_id)
             )
@@ -284,6 +386,21 @@ async def get_file(doc_id: int, download: bool = False, ctx: Container = Depends
     path = (root / row.storage_path).resolve()
     if root not in path.parents or not path.is_file():
         raise api_error(404, "missing_on_disk", "الملف غير موجود على القرص. ربما نُقل أو حُذف.")
+    return row, path
+
+
+@router.get("/thumbs/{doc_id}")
+async def thumbnail(doc_id: int, ctx: Container = Depends(get_ctx)):
+    row, path = await _stored_file(ctx, doc_id)
+    thumb = await ctx.thumbs.get(row.sha256, path, row.ext)
+    if thumb is None:
+        raise api_error(404, "no_thumbnail", "لا توجد صورة غلاف لهذا الملف.")
+    return FileResponse(thumb, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
+
+
+@router.get("/files/{doc_id}")
+async def get_file(doc_id: int, download: bool = False, ctx: Container = Depends(get_ctx)):
+    row, path = await _stored_file(ctx, doc_id)
     # Files come from strangers' channels. Only types the browser renders
     # without running scripts may open inline on this origin; anything else
     # (HTML, SVG, ...) is forced to download and sandboxed.

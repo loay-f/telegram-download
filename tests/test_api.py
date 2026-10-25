@@ -34,6 +34,7 @@ def client(settings):
         c.post("/api/settings", json={"allowed_exts": "pdf,epub,html"})
         c.get("/api/chats")  # syncs dialogs into the DB
         for chat in (-1001, -1002):
+            c.post(f"/api/chats/{chat}/settings", json={"auto_download": True})
             c.post(f"/api/chats/{chat}/track", json={"tracked": True})
 
         def settled():
@@ -47,9 +48,9 @@ def client(settings):
 def test_library_groups_duplicates_and_lists_appearances(client):
     lib = client.get("/api/library").json()
     assert lib["total"] == 3
-    tafsir = next(i for i in lib["items"] if i["copies"] == 2)
+    tafsir = next(e for i in lib["items"] for e in i["entries"] if e["copies"] == 2)
     assert {a["chat_title"] for a in tafsir["appearances"]} == {"مكتبة التراث", "قناة التاريخ"}
-    assert tafsir["appearances"][0]["link"] is None or "t.me" in tafsir["appearances"][0]["link"]
+    assert tafsir["other_names"] and tafsir["has_file"]
 
 
 @pytest.mark.parametrize(
@@ -70,7 +71,7 @@ def test_library_filters(client):
 
 
 def test_file_download_arabic_name(client):
-    item = next(i for i in client.get("/api/library", params={"q": "الطبري"}).json()["items"])
+    item = client.get("/api/library", params={"q": "الطبري"}).json()["items"][0]["entries"][0]
     r = client.get(f"/api/files/{item['id']}")
     assert r.status_code == 200 and r.content == PDF
     cd = r.headers["content-disposition"]
@@ -81,7 +82,7 @@ def test_file_download_arabic_name(client):
 
 
 def test_html_file_is_never_served_inline(client):
-    item = client.get("/api/library", params={"q": "page"}).json()["items"][0]
+    item = client.get("/api/library", params={"q": "page"}).json()["items"][0]["entries"][0]
     r = client.get(f"/api/files/{item['id']}")
     assert r.headers["content-disposition"].startswith("attachment")
     assert r.headers["content-type"].startswith("application/octet-stream")

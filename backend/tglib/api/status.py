@@ -42,6 +42,13 @@ async def get_settings(ctx: Container = Depends(get_ctx)):
         "workers": s.workers,
         "scan_interval_hours": s.scan_interval_hours,
         "max_attempts": s.max_attempts,
+        "speed_limit_kbps": s.speed_limit_kbps,
+        "schedule_enabled": bool(s.schedule_enabled),
+        "schedule_start": s.schedule_start,
+        "schedule_end": s.schedule_end,
+        "timezone": s.timezone,
+        "summary_enabled": bool(s.summary_enabled),
+        "summary_hour": s.summary_hour,
         "storage": _storage(ctx),
         "library_bytes": (await ctx.stats.get())["library_bytes"],
     }
@@ -53,12 +60,19 @@ class SettingsIn(BaseModel):
     workers: int | None = Field(default=None, ge=1, le=10)
     scan_interval_hours: int | None = Field(default=None, ge=1, le=168)
     max_attempts: int | None = Field(default=None, ge=1, le=50)
+    speed_limit_kbps: int | None = Field(default=None, ge=0)
+    schedule_enabled: bool | None = None
+    schedule_start: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    schedule_end: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    timezone: str | None = Field(default=None, max_length=64)
+    summary_enabled: bool | None = None
+    summary_hour: int | None = Field(default=None, ge=0, le=23)
 
 
 @router.post("/settings")
 async def update_settings(body: SettingsIn, ctx: Container = Depends(get_ctx)):
     before = ctx.app_settings.current
-    changes = body.model_dump(exclude_none=True)
+    changes = {k: int(v) if isinstance(v, bool) else v for k, v in body.model_dump(exclude_none=True).items()}
     after = await ctx.app_settings.update(changes)
     reopened = 0
     if (before.allowed_exts, before.max_size_mb) != (after.allowed_exts, after.max_size_mb):
@@ -66,6 +80,7 @@ async def update_settings(body: SettingsIn, ctx: Container = Depends(get_ctx)):
             reopened = await reapply_filters(s, after)
         if reopened:
             ctx.engine.wake()
+    ctx.engine.wake()  # a new schedule may allow downloading right now
     result = await get_settings(ctx)
     result["reopened"] = reopened
     return result

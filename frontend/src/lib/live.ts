@@ -8,6 +8,7 @@ export type EngineStateName =
   | "flood_wait"
   | "disk_full"
   | "offline"
+  | "scheduled"
   | "waiting_telegram";
 
 export interface ActiveDownload {
@@ -22,7 +23,7 @@ export interface Stats {
   files: number;
   library_bytes: number;
   documents: number;
-  status_counts: Record<"pending" | "downloading" | "done" | "failed" | "skipped" | "duplicate", number>;
+  status_counts: Record<"available" | "pending" | "downloading" | "done" | "failed" | "skipped" | "duplicate", number>;
   duplicates: number;
   space_saved_bytes: number;
   bandwidth_saved_bytes: number;
@@ -37,6 +38,8 @@ export interface LiveStatus {
     flood_wait_seconds: number;
     disk_full: string | null;
     workers: number;
+    speed_limit_kbps: number;
+    schedule: { enabled: boolean; start: string; end: string };
     active: ActiveDownload[];
   };
   scan: {

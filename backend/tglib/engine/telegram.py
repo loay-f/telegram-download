@@ -142,6 +142,19 @@ class TelegramGateway(abc.ABC):
         self, message: DocMessage, offset: int, request_size: int
     ) -> AsyncIterator[bytes]: ...
 
+    @abc.abstractmethod
+    async def search_documents(self, query: str, limit: int) -> list[tuple[DocMessage, DialogInfo]]:
+        """Files matching `query` across all of the account's chats."""
+
+    @abc.abstractmethod
+    async def resolve_link(self, peer: str | int, msg_id: int) -> tuple[DocMessage, DialogInfo] | None:
+        """The file in a message given by a t.me link (peer is a username or a
+        marked chat id); None if the message has no file."""
+
+    @abc.abstractmethod
+    async def send_to_saved(self, text: str) -> None:
+        """Posts a message to the account's Saved Messages."""
+
 
 def _naive_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
@@ -352,31 +365,11 @@ class TelethonGateway(TelegramGateway):
 
     # --- data ---
     async def iter_dialogs(self) -> AsyncIterator[DialogInfo]:
-        from telethon.tl import types
-
         async with self._translate():
             async for d in self._client.iter_dialogs():
-                ent = d.entity
-                if isinstance(ent, types.Channel):
-                    kind = "group" if ent.megagroup or ent.gigagroup else "channel"
-                elif isinstance(ent, types.Chat):
-                    kind = "group"
-                elif isinstance(ent, types.User):
-                    kind = "saved" if ent.is_self else "bot" if ent.bot else "user"
-                else:
-                    continue
-                if kind == "saved":
-                    title = "الرسائل المحفوظة"
-                elif getattr(ent, "deleted", False):
-                    title = "حساب محذوف"
-                else:
-                    title = d.name or ""
-                yield DialogInfo(
-                    id=d.id,
-                    title=title,
-                    username=getattr(ent, "username", None),
-                    type=kind,
-                )
+                info = _dialog_info(d.entity, d.id, d.name)
+                if info is not None:
+                    yield info
 
     def _to_doc_message(self, chat_id: int, msg) -> DocMessage | None:
         doc = getattr(msg, "document", None)
@@ -425,6 +418,46 @@ class TelethonGateway(TelegramGateway):
             return None
         return self._to_doc_message(chat_id, msg)
 
+    async def search_documents(self, query: str, limit: int) -> list[tuple[DocMessage, DialogInfo]]:
+        from telethon import utils
+        from telethon.tl.types import InputMessagesFilterDocument
+
+        hits = []
+        async with self._translate():
+            async for msg in self._client.iter_messages(
+                None, search=query, filter=InputMessagesFilterDocument, limit=limit
+            ):
+                chat_id = utils.get_peer_id(msg.peer_id)
+                chat = msg.chat or await msg.get_chat()
+                info = _dialog_info(chat, chat_id, utils.get_display_name(chat)) if chat else None
+                dm = self._to_doc_message(chat_id, msg)
+                if dm is not None and info is not None:
+                    hits.append((dm, info))
+        return hits
+
+    async def resolve_link(self, peer: str | int, msg_id: int) -> tuple[DocMessage, DialogInfo] | None:
+        from telethon import utils
+
+        if isinstance(peer, int):
+            await self._entity(peer)  # makes sure the chat is in the cache
+        try:
+            async with self._translate():
+                entity = await self._client.get_entity(peer)
+        except (ValueError, TypeError) as e:
+            raise ChatUnavailable(str(e)) from e
+        chat_id = utils.get_peer_id(entity)
+        async with self._translate():
+            msg = await self._client.get_messages(entity, ids=msg_id)
+        dm = self._to_doc_message(chat_id, msg) if msg is not None else None
+        info = _dialog_info(entity, chat_id, utils.get_display_name(entity))
+        if dm is None or info is None:
+            return None
+        return dm, info
+
+    async def send_to_saved(self, text: str) -> None:
+        async with self._translate():
+            await self._client.send_message("me", text, link_preview=False)
+
     async def iter_download(
         self, message: DocMessage, offset: int, request_size: int
     ) -> AsyncIterator[bytes]:
@@ -441,6 +474,27 @@ class TelethonGateway(TelegramGateway):
         finally:
             # Releases the borrowed connection if the file lives on another DC.
             await it.close()
+
+
+def _dialog_info(entity, chat_id: int, name: str | None) -> DialogInfo | None:
+    """Classifies a Telethon User/Chat/Channel as channel/group/user/bot/saved."""
+    from telethon.tl import types
+
+    if isinstance(entity, types.Channel):
+        kind = "group" if entity.megagroup or entity.gigagroup else "channel"
+    elif isinstance(entity, (types.Chat, types.ChatForbidden, types.ChannelForbidden)):
+        kind = "group"
+    elif isinstance(entity, types.User):
+        kind = "saved" if entity.is_self else "bot" if entity.bot else "user"
+    else:
+        return None
+    if kind == "saved":
+        title = "الرسائل المحفوظة"
+    elif getattr(entity, "deleted", False):
+        title = "حساب محذوف"
+    else:
+        title = name or ""
+    return DialogInfo(id=chat_id, title=title, username=getattr(entity, "username", None), type=kind)
 
 
 def _code_via(code_type) -> str:

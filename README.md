@@ -53,7 +53,14 @@ docker compose up -d --build
 - اكتب كلمة مرور البرنامج.
 - اكتب رقم هاتفك في تيليغرام (مع رمز الدولة مثل `‎+966…`)، ثم الرمز الذي يصلك في تطبيق
   تيليغرام، ثم كلمة مرور التحقق بخطوتين إن كانت مفعّلة.
-- اذهب إلى **المحادثات** وفعّل متابعة القنوات أو المجموعات أو المحادثات الخاصة التي تريد كتبها. يبدأ الفحص والتنزيل تلقائياً.
+- اذهب إلى **المحادثات** وفعّل متابعة القنوات أو المجموعات أو المحادثات الخاصة التي تريد كتبها.
+  المتابعة **تفحص فقط**: تظهر الملفات في **المكتبة ← متاحة للتنزيل**، وتختار أنت ما يُنزَّل (ملفاً
+  ملفاً، أو كل ملفات محادثة). ويمكن تفعيل «نزّل الملفات الجديدة تلقائياً» لمحادثة بعينها من «خيارات».
+- **البحث في تيليغرام**: ابحث باسم كتاب في كل محادثاتك، أو الصق رابط رسالة (`t.me/...`) لتنزيل ملفها.
+- الكتب تُحفظ على القرص في مجلد لكل محادثة: `library/<اسم المحادثة>/<اسم الملف>`.
+- في **المكتبة**: تصفّح حسب المحادثة، والأجزاء المتعددة لكتاب واحد تظهر معاً، وصور الأغلفة، وقارئ
+  مدمج لملفات PDF و EPUB، وحذف كتاب.
+- في **الإعدادات**: ساعات التنزيل، وحد السرعة، والملخص اليومي في «الرسائل المحفوظة». يبدأ الفحص والتنزيل تلقائياً.
 
 يعمل البرنامج في الخلفية ويعود للعمل تلقائياً بعد إعادة تشغيل الجهاز (ما دام Docker Desktop
 يعمل عند بدء ويندوز). لإيقافه: `docker compose stop`. لتشغيله مجدداً: `docker compose start`.
@@ -138,8 +145,22 @@ docker compose up -d --build
 | `COOKIE_SECURE` | Set `true` when served over HTTPS |
 
 Open <http://127.0.0.1:8000>, enter the app password, then log in to Telegram
-(phone → code → two-step password if enabled). Track chats on the **المحادثات**
-(Chats) page; scanning and downloading start automatically.
+(phone → code → two-step password, or scan a QR code from the phone app).
+
+- Tracking a chat on **المحادثات** (Chats) only scans it: its files are listed
+  as *available* in the Library and downloaded when you pick them (one by one,
+  a selection, or a whole chat). A per-chat option downloads new files
+  automatically.
+- **البحث في تيليغرام** (Search) finds files across all your chats, and
+  downloads the file from a pasted `t.me` message link.
+- Files are stored as `library/<chat name>/<file name>`, once per unique
+  content (in the chat where it was first posted).
+- The Library browses by chat, groups multi-volume works, shows cover
+  thumbnails, has a built-in PDF/EPUB reader, and can delete books.
+- Settings include download hours, a speed limit and a daily summary sent to
+  your Saved Messages.
+
+Cover thumbnails use PyMuPDF (AGPL-3.0); fine for personal self-hosting.
 
 Volumes: `./data` → `/data` (database, Telegram session, logs, secret key) and
 `STORAGE_HOST_PATH` → `/storage` (`library/` holds files named by SHA-256;

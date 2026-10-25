@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { ApiError, api, post } from "../lib/api";
-import { NOUNS, ago, count } from "../lib/format";
+import { NOUNS, ago, count, num } from "../lib/format";
 import { useLive } from "../lib/live";
 import { Alert, Button, Spinner, Toggle } from "../components/ui";
 
@@ -35,6 +36,8 @@ interface ChatRow {
   files: number;
   downloaded: number;
   pending: number;
+  available: number;
+  auto_download: boolean;
   scanning: boolean;
   queued: boolean;
 }
@@ -99,8 +102,8 @@ export function ChatsPage() {
     <div className="space-y-6">
       <h1 className="page-title">المحادثات</h1>
       <p className="text-ink-soft max-w-2xl">
-        فعّل متابعة القنوات والمجموعات والمحادثات التي تريد تنزيل كتبها. يفحصها البرنامج الآن ثم يعيد فحصها تلقائياً
-        لالتقاط الكتب الجديدة.
+        فعّل متابعة محادثة ليفحصها البرنامج ويعرض ملفاتها في «المكتبة»، ثم يعيد فحصها تلقائياً لالتقاط الجديد.
+        المتابعة لا تُنزّل شيئاً: أنت تختار ما يُنزَّل، أو تفعّل التنزيل التلقائي للمحادثة من «خيارات».
       </p>
 
       <div className="flex flex-wrap gap-3 items-center">
@@ -185,9 +188,18 @@ function ChatItem({ chat: c, onChanged, act }: {
           </div>
           {c.tracked && (
             <p className="mt-1 text-sm text-ink-soft">
-              {count(c.files, NOUNS.file)} · نُزّل {count(c.downloaded, NOUNS.file)}
-              {c.pending > 0 && <> · {count(c.pending, NOUNS.file)} في الانتظار</>} · آخر فحص:{" "}
-              {scanState ?? ago(c.last_scan_at)}
+              {c.files === 0 ? "لا توجد ملفات بعد" : count(c.files, NOUNS.file)}
+              {c.downloaded > 0 && <> · نُزّل {count(c.downloaded, NOUNS.file)}</>}
+              {c.available > 0 && (
+                <>
+                  {" · "}
+                  <Link to={`/library?view=available&chat=${c.id}`} className="text-binding underline underline-offset-4">
+                    {count(c.available, NOUNS.file)} متاحة للتنزيل
+                  </Link>
+                </>
+              )}
+              {c.pending > 0 && <> · {count(c.pending, NOUNS.file)} في الانتظار</>}
+              {c.auto_download && <> · تنزيل تلقائي</>} · آخر فحص: {scanState ?? ago(c.last_scan_at)}
             </p>
           )}
           {c.tracked && c.last_scan_error && <p className="mt-1 text-sm text-danger">{c.last_scan_error}</p>}
@@ -202,6 +214,11 @@ function ChatItem({ chat: c, onChanged, act }: {
               {c.scanning ? <Spinner /> : null}
               افحص الآن
             </Button>
+            {c.available > 0 && (
+              <Button variant="secondary" onClick={() => act(() => post(`/api/chats/${c.id}/download-all`))}>
+                نزّل الكل ({num(c.available)})
+              </Button>
+            )}
             <Button variant="quiet" aria-expanded={open} onClick={() => setOpen(!open)}>
               خيارات
             </Button>
@@ -216,12 +233,14 @@ function ChatItem({ chat: c, onChanged, act }: {
 function ChatOptions({ chat, onSaved }: { chat: ChatRow; onSaved: () => Promise<void> }) {
   const [exts, setExts] = useState(chat.allowed_exts ?? "");
   const [maxMb, setMaxMb] = useState(chat.max_size_mb?.toString() ?? "");
+  const [auto, setAuto] = useState(chat.auto_download);
   const [saved, setSaved] = useState(false);
 
   async function save() {
     await post(`/api/chats/${chat.id}/settings`, {
       allowed_exts: exts.trim() || null,
       max_size_mb: maxMb.trim() === "" ? null : Number(maxMb),
+      auto_download: auto,
     });
     setSaved(true);
     await onSaved();
@@ -229,7 +248,24 @@ function ChatOptions({ chat, onSaved }: { chat: ChatRow; onSaved: () => Promise<
 
   return (
     <div className="mt-4 ms-18 rounded-lg bg-paper p-4 space-y-3">
-      <p className="text-sm text-ink-soft">اترك الحقل فارغاً لاستخدام الإعداد العام.</p>
+      <label className="flex items-start gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={auto}
+          onChange={(e) => {
+            setAuto(e.target.checked);
+            setSaved(false);
+          }}
+          className="mt-1 size-5 accent-binding"
+        />
+        <span>
+          <span className="block font-semibold">نزّل الملفات الجديدة تلقائياً</span>
+          <span className="block text-sm text-ink-soft">
+            كل ملف جديد يظهر في هذه المحادثة يُنزَّل دون أن تختاره. الملفات الموجودة سابقاً لا تتأثر.
+          </span>
+        </span>
+      </label>
+      <p className="text-sm text-ink-soft">اترك الحقلين التاليين فارغين لاستخدام الإعداد العام.</p>
       <label className="block">
         <span className="block font-semibold mb-1">أنواع الملفات لهذه المحادثة</span>
         <input

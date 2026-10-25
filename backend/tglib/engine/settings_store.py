@@ -1,7 +1,10 @@
 """User-tunable settings stored in the DB `settings` table, cached in memory."""
 
 import logging
+import re
 from dataclasses import asdict, dataclass, fields
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
 
@@ -20,9 +23,33 @@ class AppSettings:
     workers: int = 3
     scan_interval_hours: int = 6
     max_attempts: int = 5
+    speed_limit_kbps: int = 0  # 0 = unlimited
+    schedule_enabled: int = 0  # download only between schedule_start and schedule_end
+    schedule_start: str = "01:00"
+    schedule_end: str = "07:00"
+    timezone: str = "UTC"  # IANA name, taken from the user's browser
+    summary_enabled: int = 0  # daily summary in Telegram's Saved Messages
+    summary_hour: int = 8
 
     def ext_set(self) -> set[str]:
         return parse_exts(self.allowed_exts)
+
+    def tz(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            return ZoneInfo("UTC")
+
+    def in_download_window(self, now: datetime | None = None) -> bool:
+        if not self.schedule_enabled:
+            return True
+        t = (now or datetime.now(self.tz())).astimezone(self.tz()).strftime("%H:%M")
+        start, end = self.schedule_start, self.schedule_end
+        if start == end:
+            return True
+        if start < end:
+            return start <= t < end
+        return t >= start or t < end  # the window crosses midnight
 
 
 def parse_exts(value: str | None) -> set[str]:
@@ -40,7 +67,12 @@ LIMITS = {
     "workers": (1, 10),
     "scan_interval_hours": (1, 24 * 7),
     "max_attempts": (1, 50),
+    "speed_limit_kbps": (0, 1024 * 1024),
+    "schedule_enabled": (0, 1),
+    "summary_enabled": (0, 1),
+    "summary_hour": (0, 23),
 }
+_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 class SettingsStore:
@@ -65,6 +97,14 @@ class SettingsStore:
         merged["allowed_exts"] = clean_exts(merged["allowed_exts"])
         for key, (lo, hi) in LIMITS.items():
             merged[key] = max(lo, min(hi, int(merged[key])))
+        defaults = AppSettings()
+        for key in ("schedule_start", "schedule_end"):
+            if not _TIME.match(merged[key]):
+                merged[key] = getattr(self.current, key) if _TIME.match(getattr(self.current, key)) else getattr(defaults, key)
+        try:
+            ZoneInfo(merged["timezone"])
+        except (ZoneInfoNotFoundError, ValueError):
+            merged["timezone"] = self.current.timezone
         async with self._db.write() as s:
             for key, value in merged.items():
                 await s.merge(Setting(key=key, value=str(value)))

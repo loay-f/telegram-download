@@ -4,6 +4,7 @@ const NAV = [
   { to: "/", label: "الرئيسية", end: true },
   { to: "/chats", label: "المحادثات" },
   { to: "/library", label: "المكتبة" },
+  { to: "/search", label: "البحث في تيليغرام" },
   { to: "/queue", label: "قائمة الانتظار والأخطاء" },
   { to: "/settings", label: "الإعدادات" },
 ];
