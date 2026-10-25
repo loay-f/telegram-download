@@ -58,6 +58,18 @@ class DocMessage:
 
 
 @dataclass
+class SentCodeInfo:
+    phone_code_hash: str
+    # Where Telegram sent the code: app / sms / call / email / fragment /
+    # setup_email (account must add a login email first) / other.
+    via: str
+    next_via: str | None = None  # what "send another way" would use
+    timeout: int | None = None  # seconds before resending is allowed
+    email_pattern: str | None = None  # e.g. "j***@gmail.com"
+    fragment_url: str | None = None
+
+
+@dataclass
 class MeInfo:
     id: int
     name: str
@@ -83,8 +95,9 @@ class TelegramGateway(abc.ABC):
 
     # --- login flow ---
     @abc.abstractmethod
-    async def send_code(self, phone: str) -> str:
-        """Returns phone_code_hash."""
+    async def send_code(self, phone: str) -> SentCodeInfo:
+        """Requests a login code. Calling it again for the same phone asks
+        Telegram to resend the code by its next delivery method."""
 
     @abc.abstractmethod
     async def sign_in_code(self, phone: str, code: str, phone_code_hash: str) -> None:
@@ -234,7 +247,7 @@ class TelethonGateway(TelegramGateway):
         return MeInfo(id=me.id, name=name, username=me.username, phone=me.phone)
 
     # --- login flow ---
-    async def send_code(self, phone: str) -> str:
+    async def send_code(self, phone: str) -> SentCodeInfo:
         from telethon import errors
 
         try:
@@ -247,7 +260,20 @@ class TelethonGateway(TelegramGateway):
             raise AuthFlowError("api_invalid", "قيم TG_API_ID / TG_API_HASH غير صحيحة. راجع ملف ‎.env")
         except (errors.FloodError, errors.PhoneNumberFloodError) as e:
             raise AuthFlowError("flood", _flood_message(getattr(e, "seconds", 0)))
-        return sent.phone_code_hash
+        except errors.SendCodeUnavailableError:
+            raise AuthFlowError(
+                "no_more_methods",
+                "استنفد تيليغرام طرق إرسال الرمز لهذا الرقم. انتظر بعض الوقت ثم ابدأ من جديد.",
+            )
+        log.info("Login code sent via %s (next: %s)", type(sent.type).__name__, type(sent.next_type).__name__)
+        return SentCodeInfo(
+            phone_code_hash=sent.phone_code_hash,
+            via=_code_via(sent.type),
+            next_via=_code_via(sent.next_type) if sent.next_type else None,
+            timeout=sent.timeout,
+            email_pattern=getattr(sent.type, "email_pattern", None),
+            fragment_url=getattr(sent.type, "url", None),
+        )
 
     async def sign_in_code(self, phone: str, code: str, phone_code_hash: str) -> None:
         from telethon import errors
@@ -374,6 +400,22 @@ class TelethonGateway(TelegramGateway):
         finally:
             # Releases the borrowed connection if the file lives on another DC.
             await it.close()
+
+
+def _code_via(code_type) -> str:
+    """Telethon SentCodeType*/CodeType* -> short delivery name."""
+    name = type(code_type).__name__
+    for key, via in (
+        ("SetUpEmail", "setup_email"),
+        ("Email", "email"),
+        ("Fragment", "fragment"),
+        ("App", "app"),
+        ("Sms", "sms"),
+        ("Call", "call"),
+    ):
+        if key in name:
+            return via
+    return "other"
 
 
 def _flood_message(seconds: int) -> str:

@@ -13,7 +13,14 @@ from tglib.engine.errors import (
     NotConnected,
     PasswordNeeded,
 )
-from tglib.engine.telegram import DialogInfo, DocMessage, DocumentInfo, MeInfo, TelegramGateway
+from tglib.engine.telegram import (
+    DialogInfo,
+    DocMessage,
+    DocumentInfo,
+    MeInfo,
+    SentCodeInfo,
+    TelegramGateway,
+)
 
 VALID_CODE = "12345"
 
@@ -51,6 +58,7 @@ class FakeGateway(TelegramGateway):
         self.block_download: asyncio.Event | None = None  # downloads wait on this
         self.downloads_started: list[tuple[int, int]] = []  # (tg_document_id, offset)
         self.inaccessible_chats: set[int] = set()
+        self.codes_sent = 0
         self.scan_calls: list[tuple[int, int]] = []  # (chat_id, min_id)
         self.get_message_calls = 0
         self.always_fail_ids: set[int] = set()  # tg_document_ids whose download always errors
@@ -95,10 +103,14 @@ class FakeGateway(TelegramGateway):
     async def get_me(self) -> MeInfo | None:
         return MeInfo(1, "Test User", "tester", "15550000") if self.authorized else None
 
-    async def send_code(self, phone: str) -> str:
+    async def send_code(self, phone: str) -> SentCodeInfo:
         if not phone.startswith("+"):
             raise AuthFlowError("phone_invalid", "bad phone")
-        return "hash-" + phone
+        self.codes_sent += 1
+        # First delivery in the app, then SMS, like Telegram usually does.
+        if self.codes_sent == 1:
+            return SentCodeInfo("hash-" + phone, via="app", next_via="sms", timeout=0)
+        return SentCodeInfo("hash-" + phone, via="sms")
 
     async def sign_in_code(self, phone: str, code: str, phone_code_hash: str) -> None:
         if phone_code_hash != "hash-" + phone:

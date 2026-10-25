@@ -2,11 +2,12 @@
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 
 from tglib.engine.errors import AuthFlowError, PasswordNeeded
 from tglib.engine.events import EventBus
-from tglib.engine.telegram import MeInfo, TelegramGateway
+from tglib.engine.telegram import MeInfo, SentCodeInfo, TelegramGateway
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ class TelegramAccount:
         self.me: MeInfo | None = None
         self.phone: str | None = None
         self._phone_code_hash: str | None = None
+        self._code: SentCodeInfo | None = None
+        self._code_sent_at = 0.0
         self._ready = asyncio.Event()
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
@@ -110,9 +113,20 @@ class TelegramAccount:
         await self._ready.wait()
 
     def status(self) -> dict:
+        code = None
+        if self._code is not None and self.state == AccountState.CODE_SENT:
+            wait = (self._code.timeout or 0) - (time.time() - self._code_sent_at)
+            code = {
+                "via": self._code.via,
+                "next_via": self._code.next_via,
+                "resend_in": max(0, round(wait)),
+                "email_pattern": self._code.email_pattern,
+                "fragment_url": self._code.fragment_url,
+            }
         return {
             "state": self.state,
             "phone": self.phone,
+            "code": code,
             "me": (
                 {"name": self.me.name, "username": self.me.username, "phone": self.me.phone}
                 if self.me and self.state == AccountState.READY
@@ -141,9 +155,22 @@ class TelegramAccount:
             self._require_connected()
             if self.state == AccountState.READY:
                 raise AuthFlowError("already", "الحساب مسجّل الدخول بالفعل.")
-            self._phone_code_hash = await self.gateway.send_code(phone)
+            self._remember_code(await self.gateway.send_code(phone))
             self.phone = phone
             self._set_state(AccountState.CODE_SENT)
+
+    async def resend_code(self) -> None:
+        """Asks Telegram to deliver the code by its next method (e.g. SMS)."""
+        async with self._lock:
+            self._require_connected()
+            if self.state != AccountState.CODE_SENT or not self.phone:
+                raise AuthFlowError("bad_step", "اطلب رمز الدخول أولاً.")
+            self._remember_code(await self.gateway.send_code(self.phone))
+
+    def _remember_code(self, info: SentCodeInfo) -> None:
+        self._phone_code_hash = info.phone_code_hash
+        self._code = info
+        self._code_sent_at = time.time()
 
     async def submit_code(self, code: str) -> None:
         code = "".join(ch for ch in code if ch.isdigit())
@@ -168,6 +195,7 @@ class TelegramAccount:
 
     async def _finish_login(self) -> None:
         self._phone_code_hash = None
+        self._code = None
         self.me = await self.gateway.get_me()
         self._set_state(AccountState.READY)
 

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { ApiError, post } from "../lib/api";
 import type { AccountStatus } from "../lib/account";
 import { Alert, Button, Field, Spinner } from "../components/ui";
@@ -81,7 +81,7 @@ export function TelegramSetup({ status, onChange }: { status: AccountStatus; onC
       ),
     },
     code_sent: {
-      subtitle: "أرسل تيليغرام رمزاً إلى حسابك. افتح تطبيق تيليغرام على هاتفك وانسخ الرمز.",
+      subtitle: "اكتب رمز الدخول الذي أرسله تيليغرام.",
       content: (
         <form
           className="space-y-5"
@@ -102,10 +102,12 @@ export function TelegramSetup({ status, onChange }: { status: AccountStatus; onC
             onChange={(e) => setValue(e.target.value)}
             className="text-center tracking-[0.4em] text-2xl"
           />
+          <CodeHint status={status} />
           {error && <Alert>{error}</Alert>}
           <Button type="submit" busy={busy} className="w-full text-lg">
             تأكيد الرمز
           </Button>
+          <ResendButton status={status} busy={busy} onResend={() => run("/api/telegram/resend-code", {})} />
           <Button type="button" variant="quiet" className="w-full" onClick={() => run("/api/telegram/cancel", {})}>
             تغيير رقم الهاتف
           </Button>
@@ -145,4 +147,69 @@ export function TelegramSetup({ status, onChange }: { status: AccountStatus; onC
 
   const step = steps[status.state] ?? steps.connecting;
   return <AuthShell subtitle={step.subtitle}>{step.content}</AuthShell>;
+}
+
+const VIA_NAME: Record<string, string> = {
+  app: "داخل تطبيق تيليغرام",
+  sms: "برسالة SMS",
+  call: "بمكالمة هاتفية",
+  email: "إلى البريد الإلكتروني",
+  fragment: "عبر Fragment",
+};
+
+/** Tells the user exactly where to look for the code. */
+function CodeHint({ status }: { status: AccountStatus }) {
+  const c = status.code;
+  if (!c) return null;
+  const text: Record<string, React.ReactNode> = {
+    app: (
+      <>
+        الرمز <strong>ليس رسالة SMS</strong>. افتح تطبيق تيليغرام على هاتفك أو حاسوبك، وابحث في قائمة المحادثات عن
+        محادثة باسم <strong>Telegram</strong> عليها علامة توثيق زرقاء؛ ستجد الرمز في آخر رسالة فيها.
+      </>
+    ),
+    sms: <>أُرسل الرمز برسالة SMS إلى رقمك. قد يستغرق وصولها دقيقة أو دقيقتين.</>,
+    call: <>سيتصل بك تيليغرام ويقرأ لك الرمز، أو يكون الرمز آخر أرقام الرقم المتصل.</>,
+    email: (
+      <>
+        أُرسل الرمز إلى بريدك الإلكتروني <bdi dir="ltr">{c.email_pattern}</bdi>. تحقق أيضاً من مجلد الرسائل غير
+        المرغوبة.
+      </>
+    ),
+    fragment: (
+      <>
+        رقمك من Fragment، فالرمز يصل هناك:{" "}
+        <a href={c.fragment_url ?? "https://fragment.com"} target="_blank" rel="noopener noreferrer" className="underline">
+          افتح Fragment
+        </a>
+        .
+      </>
+    ),
+    setup_email: (
+      <>
+        يطلب تيليغرام ربط بريد إلكتروني بحسابك قبل الدخول من برنامج جديد. افتح تطبيق تيليغرام على هاتفك:
+        الإعدادات ← الخصوصية والأمان ← بريد تسجيل الدخول، أضف بريدك، ثم ابدأ من جديد هنا.
+      </>
+    ),
+    other: <>أرسل تيليغرام الرمز بطريقة غير معتادة. افحص تطبيق تيليغرام ورسائل SMS.</>,
+  };
+  return <Alert kind="info">{text[c.via] ?? text.other}</Alert>;
+}
+
+function ResendButton({ status, busy, onResend }: { status: AccountStatus; busy: boolean; onResend: () => void }) {
+  const c = status.code;
+  const [wait, setWait] = useState(c?.resend_in ?? 0);
+  useEffect(() => setWait(c?.resend_in ?? 0), [c?.resend_in, c?.via]);
+  useEffect(() => {
+    if (wait <= 0) return;
+    const t = setTimeout(() => setWait(wait - 1), 1000);
+    return () => clearTimeout(t);
+  }, [wait]);
+  if (!c?.next_via) return null;
+  const how = VIA_NAME[c.next_via] ?? "بطريقة أخرى";
+  return (
+    <Button type="button" variant="secondary" className="w-full" disabled={busy || wait > 0} onClick={onResend}>
+      {wait > 0 ? `يمكنك طلب الرمز ${how} بعد ${wait.toLocaleString("ar-EG")} ثانية` : `لم يصلني الرمز — أرسله ${how}`}
+    </Button>
+  );
 }

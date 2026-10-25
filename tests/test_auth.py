@@ -63,6 +63,10 @@ def test_telegram_login_flow(settings, two_factor):
 
         r = client.post("/api/telegram/send-code", json={"phone": "+15551234"})
         assert r.json()["state"] == "code_sent"
+        assert r.json()["code"]["via"] == "app" and r.json()["code"]["next_via"] == "sms"
+
+        r = client.post("/api/telegram/resend-code")
+        assert r.json()["code"]["via"] == "sms" and r.json()["code"]["next_via"] is None
 
         r = client.post("/api/telegram/code", json={"code": "00000"})
         assert r.status_code == 400 and r.json()["detail"]["code"] == "code_invalid"
