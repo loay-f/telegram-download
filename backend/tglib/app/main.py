@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 
 from tglib.api import auth as auth_api
+from tglib.api import chats as chats_api
 from tglib.api import telegram as telegram_api
 from tglib.app.config import Settings, get_settings
 from tglib.app.container import Container
@@ -52,6 +53,7 @@ def create_app(
 
     app.include_router(auth_api.router)
     app.include_router(telegram_api.router)
+    app.include_router(chats_api.router)
 
     _mount_frontend(app, settings.frontend_dir)
     return app

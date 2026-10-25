@@ -7,6 +7,8 @@ from tglib.app.security import AppAuth, load_secret
 from tglib.db.session import Database
 from tglib.engine.account import TelegramAccount
 from tglib.engine.events import EventBus
+from tglib.engine.scanner import Scanner
+from tglib.engine.settings_store import SettingsStore
 from tglib.engine.telegram import TelegramGateway, TelethonGateway
 
 
@@ -25,10 +27,16 @@ class Container:
                 settings.session_path, settings.tg_api_id, settings.tg_api_hash
             )
         self.account = TelegramAccount(gateway_factory, self.events)
+        self.app_settings = SettingsStore(self.db)
+        self.scanner = Scanner(self.db, self.account, self.app_settings, self.events)
+        self.dialogs_synced_at = 0.0
 
     async def start(self) -> None:
+        await self.app_settings.load()
         await self.account.start()
+        self.scanner.start()
 
     async def stop(self) -> None:
+        await self.scanner.stop()
         await self.account.stop()
         await self.db.dispose()

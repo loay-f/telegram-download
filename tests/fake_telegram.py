@@ -51,6 +51,7 @@ class FakeGateway(TelegramGateway):
         self.block_download: asyncio.Event | None = None  # downloads wait on this
         self.downloads_started: list[tuple[int, int]] = []  # (tg_document_id, offset)
         self.inaccessible_chats: set[int] = set()
+        self.scan_calls: list[tuple[int, int]] = []  # (chat_id, min_id)
 
     # --- helpers for tests ---
     def add_chat(self, chat_id: int, title: str, type_: str = "channel") -> FakeChat:
@@ -123,6 +124,7 @@ class FakeGateway(TelegramGateway):
     async def iter_document_messages(
         self, chat_id: int, min_id: int, offset_id: int = 0
     ) -> AsyncIterator[DocMessage]:
+        self.scan_calls.append((chat_id, min_id))
         if chat_id in self.inaccessible_chats or chat_id not in self.chats:
             raise ChatUnavailable(str(chat_id))
         ids = sorted(self.chats[chat_id].messages, reverse=True)
