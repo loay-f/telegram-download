@@ -5,6 +5,7 @@ import logging
 import time
 from collections.abc import Callable
 
+from tglib.db.models import utcnow
 from tglib.engine.errors import AuthFlowError, PasswordNeeded
 from tglib.engine.events import EventBus
 from tglib.engine.telegram import MeInfo, SentCodeInfo, TelegramGateway
@@ -18,8 +19,18 @@ class AccountState:
     OFFLINE = "offline"  # can't reach Telegram; retrying
     LOGGED_OUT = "logged_out"  # connected, waiting for phone number
     CODE_SENT = "code_sent"
+    QR_WAITING = "qr_waiting"  # showing a QR code to scan from a logged-in phone
     PASSWORD_NEEDED = "password_needed"
     READY = "ready"
+
+
+_LOGIN_IN_PROGRESS = (AccountState.CODE_SENT, AccountState.QR_WAITING, AccountState.PASSWORD_NEEDED)
+
+
+def _qr_svg(url: str) -> str:
+    import segno
+
+    return segno.make(url, error="m").svg_inline(scale=6, border=2, dark="#17302c", light="#ffffff")
 
 
 class TelegramAccount:
@@ -33,6 +44,9 @@ class TelegramAccount:
         self._phone_code_hash: str | None = None
         self._code: SentCodeInfo | None = None
         self._code_sent_at = 0.0
+        self._qr_url: str | None = None
+        self._qr_task: asyncio.Task | None = None
+        self.login_error: str | None = None  # shown when a background QR login fails
         self._ready = asyncio.Event()
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
@@ -46,6 +60,7 @@ class TelegramAccount:
         self._task = asyncio.create_task(self._supervise(), name="tg-supervisor")
 
     async def stop(self) -> None:
+        self._stop_qr()
         if self._task:
             self._task.cancel()
             try:
@@ -61,7 +76,7 @@ class TelegramAccount:
         while True:
             try:
                 if not self.gateway.is_connected():
-                    if self.state not in (AccountState.CODE_SENT, AccountState.PASSWORD_NEEDED):
+                    if self.state not in _LOGIN_IN_PROGRESS:
                         self._set_state(
                             AccountState.CONNECTING
                             if self.state == AccountState.CONNECTING
@@ -90,7 +105,7 @@ class TelegramAccount:
         if await self.gateway.is_authorized():
             self.me = await self.gateway.get_me()
             self._set_state(AccountState.READY)
-        elif self.state not in (AccountState.CODE_SENT, AccountState.PASSWORD_NEEDED):
+        elif self.state not in _LOGIN_IN_PROGRESS:
             self._set_state(AccountState.LOGGED_OUT)
 
     def _set_state(self, state: str) -> None:
@@ -123,10 +138,15 @@ class TelegramAccount:
                 "email_pattern": self._code.email_pattern,
                 "fragment_url": self._code.fragment_url,
             }
+        qr = None
+        if self._qr_url and self.state == AccountState.QR_WAITING:
+            qr = {"url": self._qr_url, "svg": _qr_svg(self._qr_url)}
         return {
             "state": self.state,
             "phone": self.phone,
             "code": code,
+            "qr": qr,
+            "login_error": self.login_error,
             "me": (
                 {"name": self.me.name, "username": self.me.username, "phone": self.me.phone}
                 if self.me and self.state == AccountState.READY
@@ -155,6 +175,7 @@ class TelegramAccount:
             self._require_connected()
             if self.state == AccountState.READY:
                 raise AuthFlowError("already", "الحساب مسجّل الدخول بالفعل.")
+            self._stop_qr()
             self._remember_code(await self.gateway.send_code(phone))
             self.phone = phone
             self._set_state(AccountState.CODE_SENT)
@@ -171,6 +192,50 @@ class TelegramAccount:
         self._phone_code_hash = info.phone_code_hash
         self._code = info
         self._code_sent_at = time.time()
+
+    async def start_qr(self) -> None:
+        """Login by scanning a QR code with Telegram on a phone that is
+        already logged in (Settings → Devices → Link Desktop Device)."""
+        async with self._lock:
+            self._require_connected()
+            if self.state == AccountState.READY:
+                raise AuthFlowError("already", "الحساب مسجّل الدخول بالفعل.")
+            self._stop_qr()
+            self._qr_url, expires = await self.gateway.qr_login_start()
+            self.login_error = None
+            self._set_state(AccountState.QR_WAITING)
+            self._qr_task = asyncio.create_task(self._qr_loop(expires), name="qr-login")
+
+    async def _qr_loop(self, expires) -> None:
+        try:
+            while self.state == AccountState.QR_WAITING:
+                left = (expires - utcnow()).total_seconds() - 1
+                try:
+                    done = await self.gateway.qr_login_wait(max(1.0, left))
+                except PasswordNeeded:
+                    self._set_state(AccountState.PASSWORD_NEEDED)
+                    return
+                if done:
+                    async with self._lock:
+                        await self._finish_login()
+                    return
+                # Token expired unscanned: show a fresh code.
+                self._qr_url, expires = await self.gateway.qr_login_start()
+                self._events.publish("account", self.status())
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("QR login failed: %s", e)
+            self.login_error = "تعذّر الدخول برمز QR. حاول مرة أخرى أو استخدم رقم الهاتف."
+            self._qr_url = None
+            if self.state == AccountState.QR_WAITING:
+                self._set_state(AccountState.LOGGED_OUT)
+
+    def _stop_qr(self) -> None:
+        if self._qr_task and not self._qr_task.done() and self._qr_task is not asyncio.current_task():
+            self._qr_task.cancel()
+        self._qr_task = None
+        self._qr_url = None
 
     async def submit_code(self, code: str) -> None:
         code = "".join(ch for ch in code if ch.isdigit())
@@ -196,12 +261,15 @@ class TelegramAccount:
     async def _finish_login(self) -> None:
         self._phone_code_hash = None
         self._code = None
+        self._qr_url = None
+        self.login_error = None
         self.me = await self.gateway.get_me()
         self._set_state(AccountState.READY)
 
     async def cancel_login(self) -> None:
         async with self._lock:
-            if self.state in (AccountState.CODE_SENT, AccountState.PASSWORD_NEEDED):
+            self._stop_qr()
+            if self.state in _LOGIN_IN_PROGRESS:
                 self._phone_code_hash = None
                 self._set_state(AccountState.LOGGED_OUT)
 

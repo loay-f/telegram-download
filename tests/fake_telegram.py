@@ -59,6 +59,9 @@ class FakeGateway(TelegramGateway):
         self.downloads_started: list[tuple[int, int]] = []  # (tg_document_id, offset)
         self.inaccessible_chats: set[int] = set()
         self.codes_sent = 0
+        self.qr_tokens = 0
+        self.qr_lifetime = 30.0
+        self.qr_scanned = asyncio.Event()  # tests set it to "scan" the QR
         self.scan_calls: list[tuple[int, int]] = []  # (chat_id, min_id)
         self.get_message_calls = 0
         self.always_fail_ids: set[int] = set()  # tg_document_ids whose download always errors
@@ -125,6 +128,20 @@ class FakeGateway(TelegramGateway):
         if password != self.password:
             raise AuthFlowError("password_invalid", "bad password")
         self.authorized = True
+
+    async def qr_login_start(self):
+        self.qr_tokens += 1
+        return f"tg://login?token=fake{self.qr_tokens}", datetime.utcnow() + timedelta(seconds=self.qr_lifetime)
+
+    async def qr_login_wait(self, timeout: float) -> bool:
+        try:
+            await asyncio.wait_for(self.qr_scanned.wait(), timeout)
+        except asyncio.TimeoutError:
+            return False
+        if self.password:
+            raise PasswordNeeded()
+        self.authorized = True
+        return True
 
     async def log_out(self) -> None:
         self.authorized = False

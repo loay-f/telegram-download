@@ -73,10 +73,11 @@ export function TelegramSetup({ status, onChange }: { status: AccountStatus; onC
             onChange={(e) => setValue(e.target.value)}
             className="text-start"
           />
-          {error && <Alert>{error}</Alert>}
+          {(error || status.login_error) && <Alert>{error ?? status.login_error}</Alert>}
           <Button type="submit" busy={busy} className="w-full text-lg">
             أرسل رمز الدخول
           </Button>
+          <QrOption busy={busy} onStart={() => run("/api/telegram/qr", {})} />
         </form>
       ),
     },
@@ -108,10 +109,38 @@ export function TelegramSetup({ status, onChange }: { status: AccountStatus; onC
             تأكيد الرمز
           </Button>
           <ResendButton status={status} busy={busy} onResend={() => run("/api/telegram/resend-code", {})} />
+          <QrOption busy={busy} onStart={() => run("/api/telegram/qr", {})} prompt="لم يصلك الرمز؟" />
           <Button type="button" variant="quiet" className="w-full" onClick={() => run("/api/telegram/cancel", {})}>
             تغيير رقم الهاتف
           </Button>
         </form>
+      ),
+    },
+    qr_waiting: {
+      subtitle: "امسح هذا الرمز بتطبيق تيليغرام على هاتفك.",
+      content: (
+        <div className="space-y-5">
+          <ol className="list-decimal ps-5 space-y-1.5">
+            <li>افتح تيليغرام على هاتفك.</li>
+            <li>
+              اذهب إلى <strong>الإعدادات</strong> ← <strong>الأجهزة</strong> ← <strong>ربط جهاز سطح المكتب</strong>.
+            </li>
+            <li>وجّه الكاميرا إلى الرمز.</li>
+          </ol>
+          {status.qr && (
+            <div
+              role="img"
+              aria-label="رمز QR لتسجيل الدخول"
+              className="mx-auto w-fit rounded-lg border border-line bg-white p-2 [&_svg]:block"
+              dangerouslySetInnerHTML={{ __html: status.qr.svg }}
+            />
+          )}
+          <p className="text-sm text-ink-soft text-center">يتجدد الرمز تلقائياً كل نصف دقيقة تقريباً.</p>
+          {error && <Alert>{error}</Alert>}
+          <Button type="button" variant="quiet" className="w-full" onClick={() => run("/api/telegram/cancel", {})}>
+            الدخول برقم الهاتف بدلاً من ذلك
+          </Button>
+        </div>
       ),
     },
     password_needed: {
@@ -211,5 +240,16 @@ function ResendButton({ status, busy, onResend }: { status: AccountStatus; busy:
     <Button type="button" variant="secondary" className="w-full" disabled={busy || wait > 0} onClick={onResend}>
       {wait > 0 ? `يمكنك طلب الرمز ${how} بعد ${wait.toLocaleString("ar-EG")} ثانية` : `لم يصلني الرمز — أرسله ${how}`}
     </Button>
+  );
+}
+
+function QrOption({ busy, onStart, prompt }: { busy: boolean; onStart: () => void; prompt?: string }) {
+  return (
+    <div className="border-t border-line pt-4 text-center">
+      {prompt && <p className="mb-2 text-ink-soft">{prompt}</p>}
+      <Button type="button" variant="secondary" className="w-full" disabled={busy} onClick={onStart}>
+        ادخل بمسح رمز QR من هاتفك
+      </Button>
+    </div>
   );
 }

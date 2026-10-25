@@ -98,3 +98,37 @@ def test_unconfigured_telegram(settings):
         assert client.get("/api/telegram/status").json()["state"] == "unconfigured"
         r = client.post("/api/telegram/send-code", json={"phone": "+1555"})
         assert r.json()["detail"]["code"] == "unconfigured"
+
+
+@pytest.mark.parametrize("two_factor", [False, True])
+def test_qr_login(settings, two_factor):
+    gw = FakeGateway(authorized=False, password="secret" if two_factor else None)
+    gw.qr_lifetime = 1.5
+    with TestClient(create_app(settings, lambda: gw)) as client:
+        login(client)
+        wait_for_state(client, "logged_out")
+        r = client.post("/api/telegram/qr").json()
+        assert r["state"] == "qr_waiting"
+        assert r["qr"]["url"] == "tg://login?token=fake1" and r["qr"]["svg"].startswith("<svg")
+
+        # An unscanned code is renewed before it expires.
+        end = time.monotonic() + 5
+        while client.get("/api/telegram/status").json()["qr"]["url"] == "tg://login?token=fake1":
+            assert time.monotonic() < end, "QR code was never renewed"
+            time.sleep(0.1)
+
+        gw.qr_scanned.set()  # the phone scans it
+        if two_factor:
+            assert wait_for_state(client, "password_needed")["state"] == "password_needed"
+            client.post("/api/telegram/password", json={"password": "secret"})
+        s = wait_for_state(client, "ready")
+        assert s["state"] == "ready" and s["qr"] is None
+
+
+def test_qr_login_can_be_cancelled(settings):
+    gw = FakeGateway(authorized=False)
+    with TestClient(create_app(settings, lambda: gw)) as client:
+        login(client)
+        wait_for_state(client, "logged_out")
+        client.post("/api/telegram/qr")
+        assert client.post("/api/telegram/cancel").json()["state"] == "logged_out"

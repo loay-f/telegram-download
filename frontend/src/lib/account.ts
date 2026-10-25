@@ -4,6 +4,7 @@ export type AccountState =
   | "offline"
   | "logged_out"
   | "code_sent"
+  | "qr_waiting"
   | "password_needed"
   | "ready";
 
@@ -20,5 +21,7 @@ export interface AccountStatus {
     email_pattern: string | null;
     fragment_url: string | null;
   } | null;
+  qr: { url: string; svg: string } | null;
+  login_error: string | null;
   me: { name: string; username: string | null; phone: string | null } | null;
 }

@@ -40,6 +40,12 @@ async def send_code(body: PhoneIn, ctx: Container = Depends(get_ctx)):
     return ctx.account.status()
 
 
+@router.post("/qr")
+async def start_qr(ctx: Container = Depends(get_ctx)):
+    await _run(ctx.account.start_qr())
+    return ctx.account.status()
+
+
 @router.post("/resend-code")
 async def resend_code(ctx: Container = Depends(get_ctx)):
     await _run(ctx.account.resend_code())

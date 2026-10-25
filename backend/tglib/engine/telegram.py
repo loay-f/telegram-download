@@ -7,6 +7,7 @@ real implementation; tests provide a fake. Only this module imports Telethon.
 from __future__ import annotations
 
 import abc
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -107,6 +108,16 @@ class TelegramGateway(abc.ABC):
     async def sign_in_password(self, password: str) -> None: ...
 
     @abc.abstractmethod
+    async def qr_login_start(self) -> tuple[str, datetime]:
+        """Starts (or renews) QR login. Returns the tg://login URL to show as a
+        QR code and when it expires (naive UTC)."""
+
+    @abc.abstractmethod
+    async def qr_login_wait(self, timeout: float) -> bool:
+        """Waits for the QR code to be scanned. True when logged in, False on
+        timeout; raises PasswordNeeded when 2FA is enabled."""
+
+    @abc.abstractmethod
     async def log_out(self) -> None:
         """Logs out and removes the session file."""
 
@@ -146,6 +157,7 @@ class TelethonGateway(TelegramGateway):
         self._api_id = api_id
         self._api_hash = api_hash
         self._client = self._new_client()
+        self._qr = None
 
     def _new_client(self):
         from telethon import TelegramClient
@@ -301,6 +313,28 @@ class TelethonGateway(TelegramGateway):
         except errors.FloodError as e:
             raise AuthFlowError("flood", _flood_message(getattr(e, "seconds", 0)))
 
+    async def qr_login_start(self) -> tuple[str, datetime]:
+        async with self._translate():
+            if self._qr is None:
+                self._qr = await self._client.qr_login()
+            else:
+                await self._qr.recreate()
+        return self._qr.url, _naive_utc(self._qr.expires)
+
+    async def qr_login_wait(self, timeout: float) -> bool:
+        from telethon import errors
+
+        try:
+            async with self._translate():
+                await self._qr.wait(timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        except errors.SessionPasswordNeededError:
+            self._qr = None
+            raise PasswordNeeded()
+        self._qr = None
+        return True
+
     async def log_out(self) -> None:
         try:
             if self._client.is_connected():
@@ -314,6 +348,7 @@ class TelethonGateway(TelegramGateway):
                 p = self._session_path.with_name(self._session_path.name + suffix)
                 p.unlink(missing_ok=True)
             self._client = self._new_client()
+            self._qr = None
 
     # --- data ---
     async def iter_dialogs(self) -> AsyncIterator[DialogInfo]:
