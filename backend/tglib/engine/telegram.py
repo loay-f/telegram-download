@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import abc
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -201,6 +202,16 @@ class TelethonGateway(TelegramGateway):
     async def connect(self) -> None:
         async with self._translate():
             await self._client.connect()
+        self._protect_session()
+
+    def _protect_session(self) -> None:
+        """The session file is a full login to the account: owner-only access."""
+        p = self._session_path.with_name(self._session_path.name + ".session")
+        try:
+            if p.exists():
+                os.chmod(p, 0o600)
+        except OSError:
+            pass
 
     async def disconnect(self) -> None:
         await self._client.disconnect()
