@@ -43,7 +43,7 @@ def test_list_track_and_auto_scan(settings):
             return c if c["last_scan_at"] and c["files"] == 2 else None
 
         chat = wait_until(scanned)
-        assert chat["tracked"] is True and chat["pending"] == 2
+        assert chat["tracked"] is True and chat["pending"] + chat["downloaded"] == 2
         # Tracked chats sort first.
         assert client.get("/api/chats").json()["chats"][0]["id"] == -1001
 

@@ -52,6 +52,8 @@ class FakeGateway(TelegramGateway):
         self.downloads_started: list[tuple[int, int]] = []  # (tg_document_id, offset)
         self.inaccessible_chats: set[int] = set()
         self.scan_calls: list[tuple[int, int]] = []  # (chat_id, min_id)
+        self.get_message_calls = 0
+        self.always_fail_ids: set[int] = set()  # tg_document_ids whose download always errors
 
     # --- helpers for tests ---
     def add_chat(self, chat_id: int, title: str, type_: str = "channel") -> FakeChat:
@@ -137,6 +139,7 @@ class FakeGateway(TelegramGateway):
     async def get_document_message(self, chat_id: int, msg_id: int) -> DocMessage | None:
         if chat_id in self.inaccessible_chats or chat_id not in self.chats:
             raise ChatUnavailable(str(chat_id))
+        self.get_message_calls += 1
         self._maybe_flood("get_message")
         if msg_id not in self.chats[chat_id].messages:
             return None
@@ -148,6 +151,8 @@ class FakeGateway(TelegramGateway):
         f: FakeFile = message.handle
         self.downloads_started.append((f.tg_document_id, offset))
         self._maybe_flood("download")
+        if f.tg_document_id in self.always_fail_ids:
+            raise RuntimeError("simulated server error")
         pos = offset
         while pos < len(f.content):
             if self.block_download is not None:

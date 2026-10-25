@@ -5,15 +5,39 @@ deferred transactions upgrading to write locks, all writes go through a
 dedicated single-connection engine that opens transactions with
 BEGIN IMMEDIATE. Reads use a separate pool and run concurrently (WAL mode).
 
-Rule: never keep a session open across a Telegram/network await.
+Rules: never keep a session open across a Telegram/network await. Session
+cleanup (commit/rollback/close) always runs to completion even if the task is
+cancelled; otherwise the single write connection could leak and every later
+write would stall.
 """
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TypeVar
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+
+T = TypeVar("T")
+
+
+async def complete(aw: Awaitable[T]) -> T:
+    """Await `aw` to completion even if the caller is cancelled meanwhile;
+    the cancellation is re-raised afterwards."""
+    task = asyncio.ensure_future(aw)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                break
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    return task.result()
 
 
 def _configure(engine: AsyncEngine, immediate: bool) -> None:
@@ -47,15 +71,24 @@ class Database:
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
-        async with self._read() as s:
+        s = self._read()
+        try:
             yield s
+        finally:
+            await complete(s.close())
 
     @asynccontextmanager
     async def write(self) -> AsyncIterator[AsyncSession]:
         """Transaction that commits on success and rolls back on error."""
-        async with self._write() as s:
-            async with s.begin():
-                yield s
+        s = self._write()
+        try:
+            yield s
+            await complete(s.commit())
+        except BaseException:
+            await complete(s.rollback())
+            raise
+        finally:
+            await complete(s.close())
 
     async def dispose(self) -> None:
         await self.read_engine.dispose()
