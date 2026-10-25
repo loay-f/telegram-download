@@ -97,6 +97,28 @@ def _apply(doc: Document, d: Decision) -> None:
         doc.completed_at = utcnow()
 
 
+async def reapply_filters(s: AsyncSession, settings: AppSettings) -> int:
+    """After the filter settings change, documents skipped by a filter become
+    pending if any chat they appeared in now accepts them. Returns how many."""
+    rows = (
+        await s.execute(
+            select(Document, Chat)
+            .join(Appearance, Appearance.document_id == Document.id)
+            .join(Chat, Chat.id == Appearance.chat_id)
+            .where(Document.status == DocStatus.SKIPPED, Document.last_error.like("filtered:%"))
+        )
+    ).all()
+    accepted: dict[int, Document] = {}
+    for doc, chat in rows:
+        if doc.id not in accepted and Filters.for_chat(chat, settings).rejection(doc.ext, doc.size) is None:
+            accepted[doc.id] = doc
+    for doc in accepted.values():
+        match = await find_name_size_match(s, doc.size, doc.normalized_name or "", doc.id)
+        _apply(doc, decide(None, match))
+        await s.flush()
+    return len(accepted)
+
+
 async def record_message(s: AsyncSession, chat: Chat, dm: DocMessage, filters: Filters) -> str:
     """Upserts one scanned message. Returns what happened:
     'known' (already recorded), 'appearance' (new place for a known document),

@@ -23,6 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 T = TypeVar("T")
 
 
+def _fold(text: str | None) -> str | None:
+    from tglib.engine.normalize import fold
+
+    return None if text is None else fold(text)
+
+
 async def complete(aw: Awaitable[T]) -> T:
     """Await `aw` to completion even if the caller is cancelled meanwhile;
     the cancellation is re-raised afterwards."""
@@ -51,6 +57,8 @@ def _configure(engine: AsyncEngine, immediate: bool) -> None:
         cur.execute("PRAGMA foreign_keys=ON")
         cur.execute("PRAGMA busy_timeout=30000")
         cur.close()
+        # fold(text): lowercase + Arabic letter normalization, for search.
+        dbapi_conn.create_function("fold", 1, _fold, deterministic=True)
 
     @event.listens_for(engine.sync_engine, "begin")
     def _on_begin(conn):

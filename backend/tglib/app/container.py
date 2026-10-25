@@ -10,6 +10,7 @@ from tglib.engine.downloader import DownloadEngine
 from tglib.engine.events import EventBus
 from tglib.engine.scanner import Scanner
 from tglib.engine.settings_store import SettingsStore
+from tglib.engine.stats import StatsCache
 from tglib.engine.telegram import TelegramGateway, TelethonGateway
 
 
@@ -35,6 +36,7 @@ class Container:
         self.scanner = Scanner(
             self.db, self.account, self.app_settings, self.events, on_new_documents=self.engine.wake
         )
+        self.stats = StatsCache(self.db)
         self.dialogs_synced_at = 0.0
 
     async def start(self) -> None:

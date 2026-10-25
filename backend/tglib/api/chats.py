@@ -9,7 +9,7 @@ from tglib.app.container import Container
 from tglib.db.models import Appearance, Chat, Document, DocStatus
 from tglib.engine.dialogs import sync_dialogs
 from tglib.engine.errors import FloodWait, TelegramError
-from tglib.engine.normalize import normalize_arabic
+from tglib.engine.normalize import fold
 from tglib.engine.settings_store import clean_exts
 
 router = APIRouter(prefix="/api/chats", tags=["chats"], dependencies=[Depends(require_auth)])
@@ -31,7 +31,7 @@ async def _chat_or_404(ctx: Container, chat_id: int) -> Chat:
 
 
 def _fold(text: str | None) -> str:
-    return normalize_arabic((text or "").lower())
+    return fold(text or "")
 
 
 @router.get("")

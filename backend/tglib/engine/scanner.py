@@ -76,7 +76,7 @@ class Scanner:
     def status(self) -> dict:
         return {
             "current": self.current.public() if self.current else None,
-            "queued": len(self._queued),
+            "queued": len(self._queued - ({self.current.chat_id} if self.current else set())),
         }
 
     async def enqueue_all_tracked(self) -> int:

@@ -30,6 +30,11 @@ def normalize_arabic(text: str) -> str:
     return text.translate(_ALEF)
 
 
+def fold(text: str) -> str:
+    """Search folding: case, Arabic letter variants, tashkeel, digits."""
+    return normalize_arabic(unicodedata.normalize("NFKC", text).lower()).translate(_DIGITS)
+
+
 def normalize_name(file_name: str | None) -> str:
     """Lowercase, no extension, no @channel tags/links, no brackets,
     separators → spaces, Arabic letter variants unified, whitespace collapsed."""
