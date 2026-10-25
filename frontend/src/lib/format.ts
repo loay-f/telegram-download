@@ -31,10 +31,28 @@ export function duration(seconds: number): string {
   return plural(Math.round(h / 24), "يوم", "يومان", "أيام", "يوماً");
 }
 
+type Forms = [one: string, two: string, few: string, many: string];
+
+export const NOUNS = {
+  book: ["كتاب واحد", "كتابان", "كتب", "كتاباً"],
+  file: ["ملف واحد", "ملفان", "ملفات", "ملفاً"],
+  chat: ["محادثة واحدة", "محادثتان", "محادثات", "محادثة"],
+  message: ["رسالة واحدة", "رسالتان", "رسائل", "رسالة"],
+  attempt: ["محاولة واحدة", "محاولتان", "محاولات", "محاولة"],
+  time: ["مرة واحدة", "مرتان", "مرات", "مرة"],
+} satisfies Record<string, Forms>;
+
+/** Arabic counted noun: "ملف واحد", "ملفان", "٥ ملفات", "١٢ ملفاً". Zero uses the "many" form. */
+export function count(n: number, forms: Forms): string {
+  if (n === 0) return `${nf.format(0)} ${forms[3]}`;
+  return plural(n, ...forms);
+}
+
 function plural(n: number, one: string, two: string, few: string, many: string): string {
   if (n === 1) return one;
   if (n === 2) return two;
-  if (n >= 3 && n <= 10) return `${nf.format(n)} ${few}`;
+  const mod100 = n % 100;
+  if (mod100 >= 3 && mod100 <= 10) return `${nf.format(n)} ${few}`;
   return `${nf.format(n)} ${many}`;
 }
 
