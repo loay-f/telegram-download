@@ -2,8 +2,52 @@
 
 @theme {
   --font-sans: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif;
+  --font-display: "Reem Kufi", "IBM Plex Sans Arabic", sans-serif;
+
+  --color-paper: #f4f6f3;
+  --color-ink: #17302c;
+  --color-ink-soft: #4d5f5b;
+  --color-binding: #1f5f55;
+  --color-binding-dark: #154640;
+  --color-binding-tint: #e3eeeb;
+  --color-gilt: #a97a1e;
+  --color-gilt-tint: #f5ecd9;
+  --color-line: #d5dcd6;
+  --color-danger: #b42318;
+  --color-danger-tint: #fbeae8;
 }
 
-body {
-  @apply bg-stone-50 text-stone-900 antialiased;
+@layer base {
+  html {
+    font-size: 17px;
+  }
+
+  body {
+    background: var(--color-paper);
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--color-gilt);
+    outline-offset: 2px;
+  }
+}
+
+/* Page title: Kufi with a binding band on the reading-start side. */
+.page-title {
+  font-family: var(--font-display);
+  font-size: 2.1rem;
+  line-height: 1.25;
+  border-inline-start: 6px solid var(--color-binding);
+  padding-inline-start: 0.75rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }

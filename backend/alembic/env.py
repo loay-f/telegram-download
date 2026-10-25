@@ -31,6 +31,9 @@ def run_migrations_online() -> None:
     )
     with connectable.connect() as connection:
         connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+        # The PRAGMA auto-began a transaction; end it, or begin_transaction()
+        # below would nest inside it and the migration would never commit.
+        connection.commit()
         # SQLite needs batch mode for ALTER TABLE in future migrations.
         context.configure(
             connection=connection, target_metadata=target_metadata, render_as_batch=True
