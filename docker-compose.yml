@@ -1,0 +1,23 @@
+services:
+  tglibrary:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: tg-library:latest
+    container_name: tg-library
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      STORAGE_DIR: /storage
+      PORT: "8000"
+    volumes:
+      - ./data:/data
+      # Large drive for downloaded files; set STORAGE_HOST_PATH in .env
+      - ${STORAGE_HOST_PATH:-./storage}:/storage
+    ports:
+      # Only reachable from this computer. To use it from other devices on your
+      # home network change to "8000:8000" (see README). Never expose it to the
+      # internet without HTTPS and a reverse proxy.
+      - "127.0.0.1:${PORT:-8000}:8000"
+    stop_grace_period: 20s
