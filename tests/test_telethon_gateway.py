@@ -1,6 +1,7 @@
 """Checks the real Telethon adapter against genuine Telethon objects (no network)."""
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from telethon import errors
@@ -84,3 +85,30 @@ async def test_unrelated_errors_pass_through(gw):
     with pytest.raises(ValueError):
         async with gw._translate():
             raise ValueError("x")
+
+
+async def test_dialog_kinds(gw, monkeypatch):
+    """Private chats, bots and Saved Messages are listed alongside channels."""
+    me = types.User(id=1, is_self=True, first_name="Me")
+    bot = types.User(id=2, bot=True, first_name="Books Bot", username="booksbot")
+    friend = types.User(id=3, first_name="صديق")
+    gone = types.User(id=4, deleted=True)
+    channel = types.Channel(id=5, title="قناة", photo=types.ChatPhotoEmpty(), date=None, broadcast=True)
+    group = types.Channel(id=6, title="مجموعة", photo=types.ChatPhotoEmpty(), date=None, megagroup=True)
+    dialogs = [SimpleNamespace(id=e.id, name=getattr(e, "title", None) or getattr(e, "first_name", None), entity=e)
+               for e in (me, bot, friend, gone, channel, group)]
+
+    async def fake_iter_dialogs():
+        for d in dialogs:
+            yield d
+
+    monkeypatch.setattr(gw._client, "iter_dialogs", fake_iter_dialogs)
+
+    assert [(d.title, d.type) async for d in gw.iter_dialogs()] == [
+        ("الرسائل المحفوظة", "saved"),
+        ("Books Bot", "bot"),
+        ("صديق", "user"),
+        ("حساب محذوف", "user"),
+        ("قناة", "channel"),
+        ("مجموعة", "group"),
+    ]

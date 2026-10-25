@@ -1,4 +1,5 @@
-"""Mirrors the account's channels and groups into the `chats` table."""
+"""Mirrors the account's chats (channels, groups, private chats, bots and
+Saved Messages) into the `chats` table."""
 
 from sqlalchemy import select, update
 
@@ -8,7 +9,7 @@ from tglib.engine.telegram import TelegramGateway
 
 
 async def sync_dialogs(db: Database, gateway: TelegramGateway) -> int:
-    dialogs = [d async for d in gateway.iter_dialogs() if d.type in ("channel", "group")]
+    dialogs = [d async for d in gateway.iter_dialogs()]
     seen = {d.id for d in dialogs}
     async with db.write() as s:
         existing = {c.id: c for c in (await s.execute(select(Chat))).scalars()}

@@ -4,11 +4,28 @@ import { NOUNS, ago, count } from "../lib/format";
 import { useLive } from "../lib/live";
 import { Alert, Button, Spinner, Toggle } from "../components/ui";
 
+type ChatType = "channel" | "group" | "user" | "bot" | "saved";
+
+const TYPE_LABEL: Record<ChatType, string> = {
+  channel: "قناة",
+  group: "مجموعة",
+  user: "محادثة خاصة",
+  bot: "بوت",
+  saved: "",
+};
+
+const KINDS = [
+  { key: "all", label: "الكل", types: null },
+  { key: "channel", label: "القنوات", types: ["channel"] },
+  { key: "group", label: "المجموعات", types: ["group"] },
+  { key: "private", label: "المحادثات الخاصة والبوتات", types: ["user", "bot", "saved"] },
+] as const;
+
 interface ChatRow {
   id: number;
   title: string;
   username: string | null;
-  type: "channel" | "group";
+  type: ChatType;
   tracked: boolean;
   is_member: boolean;
   last_scan_at: string | null;
@@ -26,6 +43,7 @@ export function ChatsPage() {
   const { revision, status } = useLive();
   const [chats, setChats] = useState<ChatRow[] | null>(null);
   const [q, setQ] = useState("");
+  const [kind, setKind] = useState<(typeof KINDS)[number]["key"]>("all");
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -52,8 +70,13 @@ export function ChatsPage() {
   const filtered = useMemo(() => {
     if (!chats) return [];
     const needle = fold(q.trim());
-    return needle ? chats.filter((c) => fold(`${c.title} ${c.username ?? ""}`).includes(needle)) : chats;
-  }, [chats, q]);
+    const types: readonly string[] | null = KINDS.find((k) => k.key === kind)!.types;
+    return chats.filter(
+      (c) =>
+        (!types || types.includes(c.type)) &&
+        (!needle || fold(`${c.title} ${c.username ?? ""}`).includes(needle)),
+    );
+  }, [chats, q, kind]);
 
   const trackedCount = chats?.filter((c) => c.tracked).length ?? 0;
 
@@ -76,7 +99,7 @@ export function ChatsPage() {
     <div className="space-y-6">
       <h1 className="page-title">المحادثات</h1>
       <p className="text-ink-soft max-w-2xl">
-        فعّل متابعة القنوات والمجموعات التي تريد تنزيل كتبها. يفحصها البرنامج الآن ثم يعيد فحصها تلقائياً
+        فعّل متابعة القنوات والمجموعات والمحادثات التي تريد تنزيل كتبها. يفحصها البرنامج الآن ثم يعيد فحصها تلقائياً
         لالتقاط الكتب الجديدة.
       </p>
 
@@ -85,7 +108,7 @@ export function ChatsPage() {
           type="search"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="ابحث باسم القناة أو المجموعة"
+          placeholder="ابحث باسم المحادثة"
           aria-label="بحث في المحادثات"
           className="flex-1 min-w-60 rounded-lg border border-line bg-white px-4 min-h-12 text-lg focus:border-binding focus:outline-none focus:ring-2 focus:ring-binding/25"
         />
@@ -101,6 +124,22 @@ export function ChatsPage() {
         </Button>
       </div>
 
+      <div role="tablist" aria-label="نوع المحادثة" className="flex flex-wrap gap-2">
+        {KINDS.map((k) => (
+          <button
+            key={k.key}
+            role="tab"
+            aria-selected={k.key === kind}
+            onClick={() => setKind(k.key)}
+            className={`rounded-full px-4 min-h-10 border transition-colors ${
+              k.key === kind ? "bg-ink text-white border-ink" : "bg-white border-line hover:border-binding"
+            }`}
+          >
+            {k.label}
+          </button>
+        ))}
+      </div>
+
       {error && <Alert>{error}</Alert>}
 
       {!chats ? (
@@ -109,7 +148,7 @@ export function ChatsPage() {
         </div>
       ) : filtered.length === 0 ? (
         <p className="text-ink-soft">
-          {q ? "لا توجد محادثة بهذا الاسم." : "لم يُعثر على قنوات أو مجموعات في حسابك."}
+          {q ? "لا توجد محادثة بهذا الاسم." : "لا توجد محادثات من هذا النوع في حسابك."}
         </p>
       ) : (
         <ul className="rounded-xl border border-line bg-white divide-y divide-line">
@@ -141,7 +180,7 @@ function ChatItem({ chat: c, onChanged, act }: {
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-3">
             <bdi className={`text-lg ${c.tracked ? "font-semibold text-ink" : ""}`}>{c.title}</bdi>
-            <span className="text-sm text-ink-soft">{c.type === "channel" ? "قناة" : "مجموعة"}</span>
+            <span className="text-sm text-ink-soft">{TYPE_LABEL[c.type] ?? c.type}</span>
             {!c.is_member && <span className="text-sm text-danger">لم تعد عضواً فيها</span>}
           </div>
           {c.tracked && (

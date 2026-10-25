@@ -8,7 +8,7 @@
 
 ## العربية
 
-برنامج يعمل على جهازك ويُنزّل الكتب والملفات من قنوات ومجموعات تيليغرام التي أنت عضو فيها،
+برنامج يعمل على جهازك ويُنزّل الكتب والملفات من قنوات ومجموعات ومحادثات تيليغرام (الخاصة والبوتات والرسائل المحفوظة)،
 ويحفظ معلوماتها في قاعدة بيانات، ولا يحفظ الكتاب نفسه مرتين حتى لو نُشر في أكثر من قناة أو
 رُفع من جديد باسم آخر. إذا انقطع الإنترنت أو الكهرباء أو أُعيد تشغيل الجهاز، يكمل التنزيل من
 حيث توقف.
@@ -53,7 +53,7 @@ docker compose up -d --build
 - اكتب كلمة مرور البرنامج.
 - اكتب رقم هاتفك في تيليغرام (مع رمز الدولة مثل `‎+966…`)، ثم الرمز الذي يصلك في تطبيق
   تيليغرام، ثم كلمة مرور التحقق بخطوتين إن كانت مفعّلة.
-- اذهب إلى **المحادثات** وفعّل متابعة القنوات التي تريد كتبها. يبدأ الفحص والتنزيل تلقائياً.
+- اذهب إلى **المحادثات** وفعّل متابعة القنوات أو المجموعات أو المحادثات الخاصة التي تريد كتبها. يبدأ الفحص والتنزيل تلقائياً.
 
 يعمل البرنامج في الخلفية ويعود للعمل تلقائياً بعد إعادة تشغيل الجهاز (ما دام Docker Desktop
 يعمل عند بدء ويندوز). لإيقافه: `docker compose stop`. لتشغيله مجدداً: `docker compose start`.
@@ -109,8 +109,8 @@ docker compose up -d --build
 
 ## English
 
-A self-hosted web app that downloads books and documents from the Telegram
-channels and groups you belong to, keeps their metadata in SQLite, stores each
+A self-hosted web app that downloads books and documents from your Telegram
+channels, groups, private chats, bots and Saved Messages, keeps their metadata in SQLite, stores each
 unique file only once, and resumes interrupted downloads after restarts, network
 drops or power loss. The UI is Arabic and right-to-left.
 

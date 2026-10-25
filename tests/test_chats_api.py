@@ -30,7 +30,9 @@ def test_list_track_and_auto_scan(settings):
         login(client)
         wait_for_state(client, "ready")
         chats = client.get("/api/chats").json()["chats"]
-        assert {c["id"] for c in chats} == {-1001, -1002, -1003}  # users excluded
+        assert {c["id"]: c["type"] for c in chats} == {
+            -1001: "channel", -1002: "channel", -1003: "group", 42: "user",
+        }
 
         # Search folds Arabic letter variants (ة ↔ ه).
         found = client.get("/api/chats", params={"q": "التراث"}).json()["chats"]

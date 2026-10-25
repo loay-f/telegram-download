@@ -35,7 +35,7 @@ class DialogInfo:
     id: int  # Telegram "marked" peer id (channels are -100...)
     title: str
     username: str | None
-    type: str  # channel / group / user
+    type: str  # channel / group / user / bot / saved (your Saved Messages)
 
 
 @dataclass
@@ -362,12 +362,18 @@ class TelethonGateway(TelegramGateway):
                 elif isinstance(ent, types.Chat):
                     kind = "group"
                 elif isinstance(ent, types.User):
-                    kind = "user"
+                    kind = "saved" if ent.is_self else "bot" if ent.bot else "user"
                 else:
                     continue
+                if kind == "saved":
+                    title = "الرسائل المحفوظة"
+                elif getattr(ent, "deleted", False):
+                    title = "حساب محذوف"
+                else:
+                    title = d.name or ""
                 yield DialogInfo(
                     id=d.id,
-                    title=d.name or "",
+                    title=title,
                     username=getattr(ent, "username", None),
                     type=kind,
                 )
