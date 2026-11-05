@@ -36,7 +36,11 @@ def _fold(text: str | None) -> str:
 
 @router.get("")
 async def list_chats(q: str = "", refresh: bool = False, ctx: Container = Depends(get_ctx)):
-    stale = time.time() - ctx.dialogs_synced_at > DIALOG_REFRESH_SECONDS
+    stale = (
+        time.time() - ctx.dialogs_synced_at > DIALOG_REFRESH_SECONDS
+        # Logged in (again) since the last sync: the list may be another account's.
+        or ctx.dialogs_synced_at < ctx.account.ready_at
+    )
     if (refresh or stale) and ctx.account.ready:
         try:
             await sync_dialogs(ctx.db, ctx.account.gateway)

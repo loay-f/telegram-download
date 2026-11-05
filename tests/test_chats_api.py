@@ -3,7 +3,7 @@ import time
 from fastapi.testclient import TestClient
 
 from tglib.app.main import create_app
-from fake_telegram import FakeFile, FakeGateway
+from fake_telegram import VALID_CODE, FakeFile, FakeGateway
 from test_auth import login, wait_for_state
 
 
@@ -74,3 +74,25 @@ def test_left_chats_hidden_unless_tracked(settings):
         del gw.chats[-1002]
         chats = client.get("/api/chats", params={"refresh": True}).json()["chats"]
         assert [(c["id"], c["is_member"]) for c in chats] == [(-1001, False)]
+
+
+def test_new_login_refreshes_chat_list(settings):
+    gw = FakeGateway()
+    gw.add_chat(-1001, "Old account channel")
+
+    with TestClient(create_app(settings, lambda: gw)) as client:
+        login(client)
+        wait_for_state(client, "ready")
+        assert [c["id"] for c in client.get("/api/chats").json()["chats"]] == [-1001]
+
+        # Log out and back in (another device, or another account) with different chats.
+        assert client.post("/api/telegram/logout").status_code == 200
+        wait_for_state(client, "logged_out")
+        gw.add_chat(-1002, "New account channel")
+        client.post("/api/telegram/send-code", json={"phone": "+15551234"})
+        client.post("/api/telegram/code", json={"code": VALID_CODE})
+        wait_for_state(client, "ready")
+
+        # No manual refresh needed: the first list after login comes from Telegram.
+        ids = {c["id"] for c in client.get("/api/chats").json()["chats"]}
+        assert -1002 in ids

@@ -70,6 +70,12 @@ export function ChatsPage() {
     if (chats) load();
   }, [scanningId]);
 
+  // A list fetched before the account was ready is empty: fetch again once it is.
+  const accountReady = status?.account.state === "ready";
+  useEffect(() => {
+    if (accountReady) load();
+  }, [accountReady]);
+
   const filtered = useMemo(() => {
     if (!chats) return [];
     const needle = fold(q.trim());
@@ -148,6 +154,10 @@ export function ChatsPage() {
       {!chats ? (
         <div className="flex items-center gap-3 text-ink-soft">
           <Spinner className="size-5" /> جارٍ جلب المحادثات من تيليغرام…
+        </div>
+      ) : filtered.length === 0 && status && !accountReady ? (
+        <div className="flex items-center gap-3 text-ink-soft">
+          <Spinner className="size-5" /> حساب تيليغرام غير متصل بعد، ستظهر المحادثات عند اكتمال الاتصال…
         </div>
       ) : filtered.length === 0 ? (
         <p className="text-ink-soft">

@@ -48,6 +48,7 @@ class TelegramAccount:
         self._qr_task: asyncio.Task | None = None
         self.login_error: str | None = None  # shown when a background QR login fails
         self._ready = asyncio.Event()
+        self.ready_at = 0.0  # when the account last became ready (a new login)
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
@@ -114,6 +115,7 @@ class TelegramAccount:
         log.info("Telegram account: %s -> %s", self.state, state)
         self.state = state
         if state == AccountState.READY:
+            self.ready_at = time.time()
             self._ready.set()
         else:
             self._ready.clear()
