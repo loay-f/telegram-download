@@ -1,3 +1,4 @@
+import logging
 import time
 
 from fastapi import APIRouter, Depends
@@ -8,9 +9,11 @@ from tglib.api.deps import api_error, get_ctx, require_auth
 from tglib.app.container import Container
 from tglib.db.models import Appearance, Chat, Document, DocStatus
 from tglib.engine.dialogs import sync_dialogs
-from tglib.engine.errors import FloodWait, TelegramError
+from tglib.engine.errors import FloodWait, NotAuthorized, TelegramError
 from tglib.engine.normalize import fold
 from tglib.engine.settings_store import clean_exts
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chats", tags=["chats"], dependencies=[Depends(require_auth)])
 
@@ -36,19 +39,32 @@ def _fold(text: str | None) -> str:
 
 @router.get("")
 async def list_chats(q: str = "", refresh: bool = False, ctx: Container = Depends(get_ctx)):
-    stale = (
-        time.time() - ctx.dialogs_synced_at > DIALOG_REFRESH_SECONDS
-        # Logged in (again) since the last sync: the list may be another account's.
-        or ctx.dialogs_synced_at < ctx.account.ready_at
-    )
-    if (refresh or stale) and ctx.account.ready:
+    def stale() -> bool:
+        return (
+            time.time() - ctx.dialogs_synced_at > DIALOG_REFRESH_SECONDS
+            # Logged in (again) since the last sync: the list may be another account's.
+            or ctx.dialogs_synced_at < ctx.account.ready_at
+        )
+
+    requested_at = time.time()
+    if (refresh or stale()) and ctx.account.ready:
         try:
-            await sync_dialogs(ctx.db, ctx.account.gateway)
-            ctx.dialogs_synced_at = time.time()
+            async with ctx.dialogs_lock:
+                # A sync that finished while this request waited for the lock is fresh enough.
+                if (refresh and ctx.dialogs_synced_at < requested_at) or stale():
+                    await sync_dialogs(ctx.db, ctx.account.gateway)
+                    ctx.dialogs_synced_at = time.time()
+        except NotAuthorized:
+            # The session was revoked (e.g. terminated from another device):
+            # go back to the login screen instead of showing an empty list.
+            ctx.account.mark_unauthorized()
+            raise api_error(409, "telegram_not_ready", "انتهت جلسة تيليغرام. سجّل الدخول مرة أخرى.")
         except FloodWait as e:
+            log.warning("Dialog sync delayed by flood wait: %ss", e.seconds)
             if refresh:
                 raise api_error(429, "flood", f"طلب تيليغرام الانتظار {e.seconds} ثانية قبل التحديث.")
         except TelegramError as e:
+            log.warning("Dialog sync failed: %s", e)
             if refresh:
                 raise api_error(502, "telegram", f"تعذّر جلب المحادثات من تيليغرام: {e}")
 

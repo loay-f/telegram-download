@@ -25,3 +25,7 @@ frontend/dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Desktop build output
+dist/
+build/

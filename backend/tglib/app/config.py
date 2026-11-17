@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # Turn on when the app is served over HTTPS (reverse proxy); adds the
     # Secure flag to the login cookie.
     cookie_secure: bool = False
+    # Set only by the Windows desktop launcher: a random per-launch token that
+    # lets the launcher's own window sign in without typing APP_PASSWORD.
+    desktop_token: str = ""
     frontend_dir: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parents[3] / "frontend" / "dist"
     )

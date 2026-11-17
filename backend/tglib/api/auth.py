@@ -1,6 +1,8 @@
 import asyncio
+import hmac
 
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from tglib.api.deps import api_error, get_ctx
@@ -40,6 +42,27 @@ async def login(body: LoginIn, response: Response, ctx: Container = Depends(get_
         secure=ctx.settings.cookie_secure,
     )
     return {"ok": True}
+
+
+@router.get("/desktop", include_in_schema=False)
+async def desktop_login(token: str = "", ctx: Container = Depends(get_ctx)):
+    """Sign-in link used by the Windows desktop launcher (see desktop/launcher.py)."""
+    expected = ctx.settings.desktop_token
+    if not expected or not ctx.auth.configured or not hmac.compare_digest(
+        token.encode(), expected.encode()
+    ):
+        await asyncio.sleep(1)
+        return RedirectResponse("/", status_code=303)
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        COOKIE_NAME,
+        ctx.auth.issue(),
+        max_age=MAX_AGE,
+        httponly=True,
+        samesite="strict",
+        secure=ctx.settings.cookie_secure,
+    )
+    return response
 
 
 @router.post("/logout")

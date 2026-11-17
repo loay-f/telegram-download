@@ -96,3 +96,24 @@ def test_new_login_refreshes_chat_list(settings):
         # No manual refresh needed: the first list after login comes from Telegram.
         ids = {c["id"] for c in client.get("/api/chats").json()["chats"]}
         assert -1002 in ids
+
+
+def test_revoked_session_goes_back_to_login(settings):
+    from tglib.engine.errors import NotAuthorized
+
+    gw = FakeGateway()
+    gw.add_chat(-1001, "Channel")
+
+    with TestClient(create_app(settings, lambda: gw)) as client:
+        login(client)
+        wait_for_state(client, "ready")
+
+        # Session terminated from another device: Telegram rejects the key.
+        async def revoked():
+            raise NotAuthorized("The key is not registered in the system")
+            yield
+
+        gw.iter_dialogs = revoked
+        r = client.get("/api/chats", params={"refresh": True})
+        assert r.status_code == 409
+        wait_for_state(client, "logged_out")

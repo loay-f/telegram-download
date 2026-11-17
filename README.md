@@ -13,7 +13,22 @@
 رُفع من جديد باسم آخر. إذا انقطع الإنترنت أو الكهرباء أو أُعيد تشغيل الجهاز، يكمل التنزيل من
 حيث توقف.
 
-### ما تحتاجه
+### الطريقة الأسهل: برنامج ويندوز (بدون Docker)
+
+1. فك ضغط `TGLibrary-Windows.zip` في أي مجلد (أو شغّل `TGLibrary-Setup.exe` إن توفّر)، ثم افتح
+   **`TGLibrary.exe`**.
+2. في أول تشغيل تظهر نافذة إعداد: الصق **api_id** و **api_hash** (انظر الخطوة 2 أدناه)، واختر مجلد
+   حفظ الكتب، ثم اضغط «حفظ وتشغيل».
+3. يفتح البرنامج في نافذته الخاصة ويدخل تلقائياً بدون كلمة مرور. سجّل الدخول إلى تيليغرام كما هو موضّح
+   في «التشغيل» أدناه.
+
+- إغلاق النافذة يوقف البرنامج، ويكمل التنزيل من حيث توقف عند فتحه مجدداً.
+- لتغيير الإعدادات: `TGLibrary.exe --setup` (أو اختصار «TG Library - Settings» في قائمة ابدأ).
+- البيانات وملف الجلسة في `%LOCALAPPDATA%\TGLibrary` — احفظها كما في «النسخ الاحتياطي».
+
+بناء البرنامج (للمطوّر): `powershell -ExecutionPolicy Bypass -File desktop\build.ps1`
+
+### ما تحتاجه (طريقة Docker)
 
 1. **Docker Desktop** — نزّله من <https://www.docker.com/products/docker-desktop/> وثبّته
    ثم شغّله (على ويندوز اقبل تفعيل WSL 2 إذا طُلب منك).
@@ -121,7 +136,22 @@ channels, groups, private chats, bots and Saved Messages, keeps their metadata i
 unique file only once, and resumes interrupted downloads after restarts, network
 drops or power loss. The UI is Arabic and right-to-left.
 
-### Requirements
+### Windows desktop app (no Docker)
+
+Unzip `TGLibrary-Windows.zip` (or run `TGLibrary-Setup.exe`) and open
+`TGLibrary.exe`. The first run asks for the Telegram `api_id` / `api_hash` and
+a books folder; the app then runs the server in-process and opens the UI in its
+own Edge app window, signed in automatically through a per-launch link
+(`/api/auth/desktop`, enabled only when `DESKTOP_TOKEN` is set). Closing the
+window stops the app. `TGLibrary.exe --setup` reopens the setup window. Data,
+session and logs live in `%LOCALAPPDATA%\TGLibrary`.
+
+Build it with `powershell -ExecutionPolicy Bypass -File desktop\build.ps1`
+(PyInstaller, see `desktop/`). Output: `dist\TGLibrary\` (the app folder),
+`dist\TGLibrary-Windows.zip`, and `dist\TGLibrary-Setup.exe` when
+[Inno Setup 6](https://jrsoftware.org/isdl.php) is installed.
+
+### Requirements (Docker)
 
 - Docker (Docker Desktop on Windows/macOS).
 - A Telegram API ID and hash: log in at <https://my.telegram.org>, open

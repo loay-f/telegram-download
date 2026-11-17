@@ -54,6 +54,23 @@ def test_password_change_invalidates_cookie(settings):
         assert client.get("/api/telegram/status").status_code == 401
 
 
+def test_desktop_login_link(settings):
+    desktop = settings.model_copy(update={"desktop_token": "launcher-token"})
+    with TestClient(create_app(desktop, lambda: FakeGateway())) as client:
+        r = client.get("/api/auth/desktop?token=wrong", follow_redirects=False)
+        assert r.status_code == 303 and "tglib_session" not in r.cookies
+        assert client.get("/api/telegram/status").status_code == 401
+        r = client.get("/api/auth/desktop?token=launcher-token", follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/"
+        assert client.get("/api/telegram/status").status_code == 200
+
+
+def test_desktop_login_disabled_without_token(settings):
+    with TestClient(create_app(settings, lambda: FakeGateway())) as client:
+        client.get("/api/auth/desktop?token=", follow_redirects=False)
+        assert client.get("/api/telegram/status").status_code == 401
+
+
 @pytest.mark.parametrize("two_factor", [False, True])
 def test_telegram_login_flow(settings, two_factor):
     gw = FakeGateway(authorized=False, password="secret" if two_factor else None)

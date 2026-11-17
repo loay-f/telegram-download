@@ -29,6 +29,9 @@ from tglib.engine.errors import (
 
 log = logging.getLogger(__name__)
 
+# Longest flood wait slept through while listing chats (seconds).
+DIALOGS_FLOOD_SLEEP = 300
+
 
 @dataclass
 class DialogInfo:
@@ -365,11 +368,19 @@ class TelethonGateway(TelegramGateway):
 
     # --- data ---
     async def iter_dialogs(self) -> AsyncIterator[DialogInfo]:
-        async with self._translate():
-            async for d in self._client.iter_dialogs():
-                info = _dialog_info(d.entity, d.id, d.name)
-                if info is not None:
-                    yield info
+        # Accounts with many chats need several requests, and Telegram often
+        # asks to wait ~20-60s between them. Wait it out rather than fail:
+        # a failed sync starts over from the first chat and hits it again.
+        threshold = self._client.flood_sleep_threshold
+        self._client.flood_sleep_threshold = DIALOGS_FLOOD_SLEEP
+        try:
+            async with self._translate():
+                async for d in self._client.iter_dialogs():
+                    info = _dialog_info(d.entity, d.id, d.name)
+                    if info is not None:
+                        yield info
+        finally:
+            self._client.flood_sleep_threshold = threshold
 
     def _to_doc_message(self, chat_id: int, msg) -> DocMessage | None:
         doc = getattr(msg, "document", None)
