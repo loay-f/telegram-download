@@ -1,6 +1,14 @@
 import { NOUNS, count, digits, duration } from "./format";
 import type { LiveStatus } from "./live";
 
+export const CHAT_TYPE_LABEL: Record<string, string> = {
+  channel: "قناة",
+  group: "مجموعة",
+  user: "محادثة خاصة",
+  bot: "بوت",
+  saved: "",
+};
+
 export const STATUS_LABEL: Record<string, string> = {
   available: "متاح للتنزيل",
   pending: "في الانتظار",

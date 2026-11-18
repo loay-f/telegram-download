@@ -74,4 +74,5 @@ async def cancel(ctx: Container = Depends(get_ctx)):
 async def logout(ctx: Container = Depends(get_ctx)):
     await _run(ctx.account.log_out())
     await ctx.dialogs.forget()
+    ctx.history.clear()
     return ctx.account.status()

@@ -9,6 +9,7 @@ from tglib.engine.account import TelegramAccount
 from tglib.engine.dialogs import DialogSync
 from tglib.engine.downloader import DownloadEngine
 from tglib.engine.events import EventBus
+from tglib.engine.history import ChatHistory
 from tglib.engine.scanner import Scanner
 from tglib.engine.settings_store import SettingsStore
 from tglib.engine.stats import StatsCache
@@ -46,6 +47,7 @@ class Container:
         # searching Telegram again: (chat_id, msg_id) -> (DocMessage, DialogInfo)
         self.search_cache: dict = {}
         self.dialogs = DialogSync(self.db, self.account, self.events)
+        self.history = ChatHistory(self.account)
 
     async def start(self) -> None:
         await self.app_settings.load()
@@ -57,6 +59,7 @@ class Container:
     async def stop(self) -> None:
         await self.summary.stop()
         await self.dialogs.stop()
+        await self.history.stop()
         await self.engine.stop()
         await self.scanner.stop()
         await self.account.stop()

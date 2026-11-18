@@ -62,6 +62,50 @@ class DocMessage:
 
 
 @dataclass
+class TextEntity:
+    """Formatting of a stretch of a message's text."""
+
+    type: str  # bold / italic / underline / strike / code / pre / spoiler / quote / link
+    offset: int  # in UTF-16 code units, as Telegram (and JavaScript) count them
+    length: int
+    url: str | None = None  # links only; None when the text itself is the address
+
+
+@dataclass
+class MediaInfo:
+    # photo / video / round / gif / sticker / voice / audio / file / poll /
+    # location / contact / other
+    kind: str
+    name: str | None = None  # file name, sticker emoji, poll question, contact name
+    size: int | None = None  # bytes
+    duration: int | None = None  # seconds
+    width: int | None = None
+    height: int | None = None
+    has_preview: bool = False  # `download_preview` can return a picture
+    document: DocumentInfo | None = None  # plain files: what the library records
+
+
+@dataclass
+class ChatMessage:
+    """One message as shown when reading a chat."""
+
+    chat_id: int
+    id: int
+    date: datetime | None  # naive UTC
+    text: str
+    entities: list[TextEntity]
+    out: bool  # sent by this account
+    sender: str | None  # None when the chat itself is the author (channel posts)
+    reply_to: int | None  # id of the message this one answers
+    forwarded_from: str | None  # None = not forwarded; "" = origin hidden
+    edited: bool
+    service: str | None  # join / leave / pin / title / photo / create / call / other
+    media: MediaInfo | None
+    # Opaque object passed back to `download_preview` (Telethon Message).
+    handle: Any = field(default=None, repr=False)
+
+
+@dataclass
 class SentCodeInfo:
     phone_code_hash: str
     # Where Telegram sent the code: app / sms / call / email / fragment /
@@ -157,6 +201,23 @@ class TelegramGateway(abc.ABC):
     @abc.abstractmethod
     async def send_to_saved(self, text: str) -> None:
         """Posts a message to the account's Saved Messages."""
+
+    # --- reading a chat ---
+    @abc.abstractmethod
+    async def get_history(
+        self, chat_id: int, *, offset_id: int = 0, min_id: int = 0, limit: int = 50
+    ) -> list[ChatMessage]:
+        """One page of a chat's messages, newest first: msg_id > min_id and
+        (if offset_id) msg_id < offset_id. Reading doesn't mark anything read."""
+
+    @abc.abstractmethod
+    async def get_message(self, chat_id: int, msg_id: int) -> ChatMessage | None:
+        """Fresh copy of one message (new file reference); None if deleted."""
+
+    @abc.abstractmethod
+    async def download_preview(self, message: ChatMessage, full: bool) -> bytes | None:
+        """The picture of a message whose media `has_preview`: a photo (small,
+        or full size when `full`) or the thumbnail of a video or sticker."""
 
 
 def _naive_utc(dt: datetime | None) -> datetime | None:
@@ -469,6 +530,106 @@ class TelethonGateway(TelegramGateway):
         async with self._translate():
             await self._client.send_message("me", text, link_preview=False)
 
+    # --- reading a chat ---
+    def _to_chat_message(self, chat_id: int, msg) -> ChatMessage:
+        from telethon import utils
+        from telethon.tl import types
+
+        service = _service_kind(msg.action) if isinstance(msg, types.MessageService) else None
+        sender = None
+        entity = msg.sender
+        if not msg.post and msg.sender_id != chat_id and isinstance(entity, (types.User, types.Channel, types.Chat)):
+            sender = utils.get_display_name(entity) or "حساب محذوف"
+        media = self._media_info(chat_id, msg) if service is None else None
+        return ChatMessage(
+            chat_id=chat_id,
+            id=msg.id,
+            date=_naive_utc(msg.date),
+            text=(msg.message or "") if service is None else "",
+            entities=_text_entities(msg.entities) if service is None else [],
+            out=bool(msg.out),
+            sender=sender,
+            reply_to=msg.reply_to_msg_id,
+            forwarded_from=_forward_name(msg),
+            edited=msg.edit_date is not None and not msg.edit_hide,
+            service=service,
+            media=media,
+            handle=msg if media is not None and media.has_preview else None,
+        )
+
+    def _media_info(self, chat_id: int, msg) -> MediaInfo | None:
+        from telethon.tl import types
+
+        media = msg.media
+        if media is None or isinstance(media, (types.MessageMediaEmpty, types.MessageMediaWebPage)):
+            return None  # a link preview isn't media: the link is in the text
+        if getattr(media, "ttl_seconds", None):
+            return MediaInfo("other")  # view-once media stays unopened
+        if isinstance(media, types.MessageMediaPhoto) and isinstance(media.photo, types.Photo):
+            sizes = _preview_sizes(msg)
+            w, h = (sizes[-1].w, sizes[-1].h) if sizes else (None, None)
+            return MediaInfo("photo", width=w, height=h, has_preview=bool(sizes))
+        if isinstance(media, types.MessageMediaDocument) and isinstance(media.document, types.Document):
+            f = msg.file
+            info = MediaInfo("file", name=f.name, size=f.size, has_preview=bool(_preview_sizes(msg)))
+            if msg.sticker:
+                info.kind, info.name = "sticker", f.emoji
+            elif msg.gif:
+                info.kind = "gif"
+            elif msg.video_note:
+                info.kind = "round"
+            elif msg.video:
+                info.kind = "video"
+            elif msg.voice:
+                info.kind = "voice"
+            elif msg.audio:
+                info.kind = "audio"
+                info.name = " - ".join(p for p in (f.performer, f.title) if p) or f.name
+            else:
+                dm = self._to_doc_message(chat_id, msg)
+                info.document = dm.document if dm else None
+                info.has_preview = False  # shown as a file, not as a picture
+            if info.kind in ("sticker", "gif", "round", "video"):
+                info.width, info.height = f.width, f.height
+            if info.kind in ("gif", "round", "video", "voice", "audio") and f.duration:
+                info.duration = round(f.duration)
+            return info
+        if isinstance(media, types.MessageMediaPoll):
+            question = media.poll.question
+            return MediaInfo("poll", name=getattr(question, "text", question))
+        if isinstance(media, types.MessageMediaContact):
+            name = " ".join(p for p in (media.first_name, media.last_name) if p)
+            return MediaInfo("contact", name=name or media.phone_number or None)
+        if isinstance(media, (types.MessageMediaGeo, types.MessageMediaGeoLive, types.MessageMediaVenue)):
+            return MediaInfo("location", name=getattr(media, "title", None))
+        return MediaInfo("other")
+
+    async def get_history(
+        self, chat_id: int, *, offset_id: int = 0, min_id: int = 0, limit: int = 50
+    ) -> list[ChatMessage]:
+        entity = await self._entity(chat_id)
+        async with self._translate():
+            # Up to 100 messages come in a single request.
+            msgs = await self._client.get_messages(entity, limit=limit, offset_id=offset_id, min_id=min_id)
+        return [self._to_chat_message(chat_id, m) for m in msgs]
+
+    async def get_message(self, chat_id: int, msg_id: int) -> ChatMessage | None:
+        entity = await self._entity(chat_id)
+        async with self._translate():
+            msg = await self._client.get_messages(entity, ids=msg_id)
+        return self._to_chat_message(chat_id, msg) if msg is not None else None
+
+    async def download_preview(self, message: ChatMessage, full: bool) -> bytes | None:
+        msg = message.handle
+        sizes = _preview_sizes(msg) if msg is not None else []
+        if not sizes:
+            return None
+        # Small: the first size that fills a chat bubble (Telegram's "m" is 320px).
+        size = sizes[-1] if full else next((s for s in sizes if max(s.w, s.h) >= 300), sizes[-1])
+        async with self._translate():
+            data = await self._client.download_media(msg, bytes, thumb=size.type)
+        return data or None
+
     async def iter_download(
         self, message: DocMessage, offset: int, request_size: int
     ) -> AsyncIterator[bytes]:
@@ -506,6 +667,78 @@ def _dialog_info(entity, chat_id: int, name: str | None) -> DialogInfo | None:
     else:
         title = name or ""
     return DialogInfo(id=chat_id, title=title, username=getattr(entity, "username", None), type=kind)
+
+
+def _preview_sizes(msg) -> list:
+    """Downloadable picture sizes of a message's photo, or of its document's
+    thumbnail, smallest first."""
+    from telethon.tl import types
+
+    media = msg.media
+    if isinstance(media, types.MessageMediaPhoto) and isinstance(media.photo, types.Photo):
+        sizes = media.photo.sizes
+    elif isinstance(media, types.MessageMediaDocument) and isinstance(media.document, types.Document):
+        sizes = media.document.thumbs or []
+    else:
+        return []
+    real = [s for s in sizes if isinstance(s, (types.PhotoSize, types.PhotoSizeProgressive))]
+    return sorted(real, key=lambda s: s.w * s.h)
+
+
+_ENTITY_TYPES = {
+    "MessageEntityBold": "bold",
+    "MessageEntityItalic": "italic",
+    "MessageEntityUnderline": "underline",
+    "MessageEntityStrike": "strike",
+    "MessageEntityCode": "code",
+    "MessageEntityPre": "pre",
+    "MessageEntitySpoiler": "spoiler",
+    "MessageEntityBlockquote": "quote",
+    "MessageEntityUrl": "link",
+    "MessageEntityTextUrl": "link",
+}
+
+
+def _text_entities(entities) -> list[TextEntity]:
+    out = []
+    for e in entities or []:
+        kind = _ENTITY_TYPES.get(type(e).__name__)
+        if kind is not None:
+            out.append(TextEntity(kind, e.offset, e.length, getattr(e, "url", None)))
+    return out
+
+
+def _forward_name(msg) -> str | None:
+    """Who a forwarded message is from; "" when the origin is hidden."""
+    from telethon import utils
+
+    if msg.fwd_from is None:
+        return None
+    fwd = msg.forward
+    entity = (fwd.sender or fwd.chat) if fwd is not None else None
+    name = utils.get_display_name(entity) if entity is not None else ""
+    return name or msg.fwd_from.from_name or msg.fwd_from.post_author or ""
+
+
+def _service_kind(action) -> str:
+    """Telethon MessageAction* -> what happened, for a one-line notice."""
+    name = type(action).__name__
+    for key, kind in (
+        ("ChatAddUser", "join"),
+        ("ChatJoined", "join"),
+        ("ChatDeleteUser", "leave"),
+        ("PinMessage", "pin"),
+        ("EditTitle", "title"),
+        ("EditPhoto", "photo"),
+        ("DeletePhoto", "photo"),
+        ("ChatCreate", "create"),
+        ("ChannelCreate", "create"),
+        ("PhoneCall", "call"),
+        ("GroupCall", "call"),
+    ):
+        if key in name:
+            return kind
+    return "other"
 
 
 def _code_via(code_type) -> str:

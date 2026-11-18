@@ -2,18 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApiError, api, post } from "../lib/api";
 import { NOUNS, ago, count, num } from "../lib/format";
+import { CHAT_TYPE_LABEL } from "../lib/labels";
 import { type DialogSyncStatus, useLive } from "../lib/live";
 import { Alert, Button, Spinner, Toggle } from "../components/ui";
 
 type ChatType = "channel" | "group" | "user" | "bot" | "saved";
-
-const TYPE_LABEL: Record<ChatType, string> = {
-  channel: "قناة",
-  group: "مجموعة",
-  user: "محادثة خاصة",
-  bot: "بوت",
-  saved: "",
-};
 
 const KINDS = [
   { key: "all", label: "الكل", types: null },
@@ -125,6 +118,7 @@ export function ChatsPage() {
       <p className="text-ink-soft max-w-2xl">
         فعّل متابعة محادثة ليفحصها البرنامج ويعرض ملفاتها في «المكتبة»، ثم يعيد فحصها تلقائياً لالتقاط الجديد.
         المتابعة لا تُنزّل شيئاً: أنت تختار ما يُنزَّل، أو تفعّل التنزيل التلقائي للمحادثة من «خيارات».
+        ولقراءة رسائل أي محادثة اضغط «اقرأ الرسائل».
       </p>
 
       <div className="flex flex-wrap gap-3 items-center">
@@ -221,7 +215,7 @@ function ChatItem({ chat: c, onChanged, act }: {
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-3">
             <bdi className={`text-lg ${c.tracked ? "font-semibold text-ink" : ""}`}>{c.title}</bdi>
-            <span className="text-sm text-ink-soft">{TYPE_LABEL[c.type] ?? c.type}</span>
+            <span className="text-sm text-ink-soft">{CHAT_TYPE_LABEL[c.type] ?? c.type}</span>
             {!c.is_member && <span className="text-sm text-danger">لم تعد عضواً فيها</span>}
           </div>
           {c.tracked && (
@@ -242,26 +236,37 @@ function ChatItem({ chat: c, onChanged, act }: {
           )}
           {c.tracked && c.last_scan_error && <p className="mt-1 text-sm text-danger">{c.last_scan_error}</p>}
         </div>
-        {c.tracked && (
-          <div className="flex flex-wrap gap-2 basis-full ps-18 sm:basis-auto sm:ps-0">
-            <Button
-              variant="secondary"
-              disabled={c.scanning || c.queued}
-              onClick={() => act(() => post(`/api/chats/${c.id}/scan`))}
-            >
-              {c.scanning ? <Spinner /> : null}
-              افحص الآن
-            </Button>
-            {c.available > 0 && (
-              <Button variant="secondary" onClick={() => act(() => post(`/api/chats/${c.id}/download-all`))}>
-                نزّل الكل ({num(c.available)})
+        <div className="flex flex-wrap gap-2 basis-full ps-18 sm:basis-auto sm:ps-0">
+          {c.tracked && (
+            <>
+              <Button
+                variant="secondary"
+                disabled={c.scanning || c.queued}
+                onClick={() => act(() => post(`/api/chats/${c.id}/scan`))}
+              >
+                {c.scanning ? <Spinner /> : null}
+                افحص الآن
               </Button>
-            )}
-            <Button variant="quiet" aria-expanded={open} onClick={() => setOpen(!open)}>
-              خيارات
-            </Button>
-          </div>
-        )}
+              {c.available > 0 && (
+                <Button variant="secondary" onClick={() => act(() => post(`/api/chats/${c.id}/download-all`))}>
+                  نزّل الكل ({num(c.available)})
+                </Button>
+              )}
+              <Button variant="quiet" aria-expanded={open} onClick={() => setOpen(!open)}>
+                خيارات
+              </Button>
+            </>
+          )}
+          {c.is_member && (
+            <Link
+              to={`/chats/${c.id}`}
+              aria-label={`اقرأ رسائل ${c.title}`}
+              className="inline-flex min-h-11 items-center rounded-lg px-4 font-semibold text-binding transition-colors hover:bg-binding-tint"
+            >
+              اقرأ الرسائل
+            </Link>
+          )}
+        </div>
       </div>
       {open && c.tracked && <ChatOptions chat={c} onSaved={onChanged} />}
     </li>

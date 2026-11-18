@@ -3,7 +3,7 @@
 import asyncio
 import threading
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from tglib.engine.errors import (
@@ -15,9 +15,11 @@ from tglib.engine.errors import (
     PasswordNeeded,
 )
 from tglib.engine.telegram import (
+    ChatMessage,
     DialogInfo,
     DocMessage,
     DocumentInfo,
+    MediaInfo,
     MeInfo,
     SentCodeInfo,
     TelegramGateway,
@@ -42,6 +44,8 @@ class FakeChat:
     username: str | None = None
     # msg_id -> (FakeFile, caption)
     messages: dict[int, tuple[FakeFile, str | None]] = field(default_factory=dict)
+    # msg_id -> message without a library file (text, photos, service notices)
+    talk: dict[int, ChatMessage] = field(default_factory=dict)
 
 
 class FakeGateway(TelegramGateway):
@@ -72,6 +76,14 @@ class FakeGateway(TelegramGateway):
         self.dialogs_pause_after: int | None = None
         self.dialogs_resume = threading.Event()
         self.dialog_calls = 0
+        # Reading chats
+        self.history_calls: list[tuple[int, int, int, int]] = []  # (chat_id, offset_id, min_id, limit)
+        self.message_calls: list[tuple[int, int]] = []  # get_message (chat_id, msg_id)
+        self.preview_calls: list[tuple[int, int, bool]] = []  # (chat_id, msg_id, full)
+        self.pictures: dict[tuple[int, int], bytes] = {}  # (chat_id, msg_id) -> image
+        # Messages handed out before this was last bumped have expired file references.
+        self.ref_generation = 0
+        self.history_delay = 0.0
 
     # --- helpers for tests ---
     def add_chat(self, chat_id: int, title: str, type_: str = "channel", username: str | None = None) -> FakeChat:
@@ -80,6 +92,39 @@ class FakeGateway(TelegramGateway):
 
     def post(self, chat_id: int, msg_id: int, f: FakeFile, caption: str | None = None) -> None:
         self.chats[chat_id].messages[msg_id] = (f, caption)
+
+    def say(self, chat_id: int, msg_id: int, text: str = "", **fields) -> ChatMessage:
+        """Adds a message to read: text by default; pass `media`, `service`,
+        `sender`, `out`... for anything else."""
+        defaults = dict(
+            entities=[], out=False, sender=None, reply_to=None, forwarded_from=None,
+            edited=False, service=None, media=None,
+        )
+        msg = ChatMessage(
+            chat_id=chat_id, id=msg_id, date=self.base_date + timedelta(minutes=msg_id), text=text,
+            **{**defaults, **fields},
+        )
+        self.chats[chat_id].talk[msg_id] = msg
+        return msg
+
+    def show(self, chat_id: int, msg_id: int, picture: bytes, kind: str = "photo") -> ChatMessage:
+        """Adds a photo (or a video with this thumbnail)."""
+        self.pictures[(chat_id, msg_id)] = picture
+        return self.say(chat_id, msg_id, media=MediaInfo(kind, width=320, height=200, has_preview=True))
+
+    def _chat_message(self, chat_id: int, msg_id: int) -> ChatMessage | None:
+        chat = self.chats[chat_id]
+        if msg_id in chat.talk:
+            return replace(chat.talk[msg_id], handle=self.ref_generation)
+        if msg_id not in chat.messages:
+            return None
+        dm = self._to_msg(chat_id, msg_id)
+        d = dm.document
+        return ChatMessage(
+            chat_id=chat_id, id=msg_id, date=dm.date, text=dm.caption or "", entities=[], out=False,
+            sender=None, reply_to=None, forwarded_from=None, edited=False, service=None,
+            media=MediaInfo("file", name=d.file_name, size=d.size, document=d),
+        )
 
     def _maybe_flood(self, op: str) -> None:
         if op in self.flood_on_next:
@@ -212,6 +257,34 @@ class FakeGateway(TelegramGateway):
 
     async def send_to_saved(self, text: str) -> None:
         self.saved_messages.append(text)
+
+    # --- reading a chat ---
+    def _require_chat(self, chat_id: int) -> FakeChat:
+        if chat_id in self.inaccessible_chats or chat_id not in self.chats:
+            raise ChatUnavailable(str(chat_id))
+        return self.chats[chat_id]
+
+    async def get_history(self, chat_id: int, *, offset_id: int = 0, min_id: int = 0, limit: int = 50):
+        self.history_calls.append((chat_id, offset_id, min_id, limit))
+        if self.history_delay:
+            await asyncio.sleep(self.history_delay)
+        self._maybe_flood("history")
+        chat = self._require_chat(chat_id)
+        ids = sorted({*chat.talk, *chat.messages}, reverse=True)
+        ids = [i for i in ids if i > min_id and (not offset_id or i < offset_id)]
+        return [self._chat_message(chat_id, i) for i in ids[:limit]]
+
+    async def get_message(self, chat_id: int, msg_id: int) -> ChatMessage | None:
+        self.message_calls.append((chat_id, msg_id))
+        self._require_chat(chat_id)
+        return self._chat_message(chat_id, msg_id)
+
+    async def download_preview(self, message: ChatMessage, full: bool) -> bytes | None:
+        self.preview_calls.append((message.chat_id, message.id, full))
+        self._maybe_flood("preview")
+        if message.handle != self.ref_generation:
+            raise FileRefExpired("expired")
+        return self.pictures.get((message.chat_id, message.id))
 
     async def iter_download(
         self, message: DocMessage, offset: int, request_size: int

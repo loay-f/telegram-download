@@ -8,6 +8,7 @@ import { AppLogin } from "./pages/AppLogin";
 import { TelegramSetup } from "./pages/TelegramSetup";
 import { Dashboard } from "./pages/Dashboard";
 import { ChatsPage } from "./pages/Chats";
+import { ChatViewPage } from "./pages/ChatView";
 import { LibraryPage } from "./pages/Library";
 import { QueuePage } from "./pages/Queue";
 import { SettingsPage } from "./pages/Settings";
@@ -88,6 +89,7 @@ export default function App() {
             <Route element={<Layout footer={<>متصل باسم <bdi>{account!.me?.name}</bdi></>} />}>
               <Route index element={<Dashboard />} />
               <Route path="chats" element={<ChatsPage />} />
+              <Route path="chats/:id" element={<ChatViewPage />} />
               <Route path="library" element={<LibraryPage />} />
               <Route path="search" element={<SearchPage />} />
               <Route path="queue" element={<QueuePage />} />

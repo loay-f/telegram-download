@@ -85,6 +85,27 @@ export const dateTime = (iso: string | null | undefined) => {
   return d ? dateTimeFmt.format(d) : "—";
 };
 
+const timeFmt = new Intl.DateTimeFormat("ar-EG", { timeStyle: "short" });
+const dayFmt = new Intl.DateTimeFormat("ar-EG", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+
+/** Time of day in the viewer's time zone: "٣:٤٥ م". */
+export const time = (iso: string | null | undefined) => {
+  const d = parseUtc(iso);
+  return d ? timeFmt.format(d) : "";
+};
+
+/** The viewer's calendar day: "الأربعاء، ١ مايو ٢٠٢٤". */
+export const day = (iso: string | null | undefined) => {
+  const d = parseUtc(iso);
+  return d ? dayFmt.format(d) : "";
+};
+
+/** Length of a recording: 125 -> "٢:٠٥". */
+export function clock(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  return digits(`${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`);
+}
+
 export function ago(iso: string | null | undefined): string {
   const d = parseUtc(iso);
   if (!d) return "لم يُفحص بعد";

@@ -71,6 +71,8 @@ docker compose up -d --build
 - اذهب إلى **المحادثات** وفعّل متابعة القنوات أو المجموعات أو المحادثات الخاصة التي تريد كتبها.
   المتابعة **تفحص فقط**: تظهر الملفات في **المكتبة ← متاحة للتنزيل**، وتختار أنت ما يُنزَّل (ملفاً
   ملفاً، أو كل ملفات محادثة). ويمكن تفعيل «نزّل الملفات الجديدة تلقائياً» لمحادثة بعينها من «خيارات».
+- **اقرأ الرسائل** (بجانب كل محادثة): يعرض رسائل القناة أو المجموعة أو المحادثة الخاصة للقراءة فقط،
+  مع الصور، ويمكن تنزيل أي ملف فيها إلى المكتبة. لا يُرسل شيئاً ولا يعلّم الرسائل كمقروءة.
 - **البحث في تيليغرام**: ابحث باسم كتاب في كل محادثاتك، أو الصق رابط رسالة (`t.me/...`) لتنزيل ملفها.
 - الكتب تُحفظ على القرص في مجلد لكل محادثة: `library/<اسم المحادثة>/<اسم الملف>`.
 - في **المكتبة**: تصفّح حسب المحادثة، والأجزاء المتعددة لكتاب واحد تظهر معاً، وصور الأغلفة، وقارئ
@@ -181,6 +183,11 @@ Open <http://127.0.0.1:8000>, enter the app password, then log in to Telegram
   as *available* in the Library and downloaded when you pick them (one by one,
   a selection, or a whole chat). A per-chat option downloads new files
   automatically.
+- **اقرأ الرسائل** (Read messages, next to each chat) shows the messages of a
+  channel, group or private chat, read-only: text, pictures, replies and
+  forwards, with a button to add any file to the library. Nothing is sent or
+  marked as read, and messages aren't stored: pages are fetched from Telegram
+  as you scroll.
 - **البحث في تيليغرام** (Search) finds files across all your chats, and
   downloads the file from a pasted `t.me` message link.
 - Files are stored as `library/<chat name>/<file name>`, once per unique
