@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApiError, api, post } from "../lib/api";
 import { NOUNS, ago, count, num } from "../lib/format";
-import { useLive } from "../lib/live";
+import { type DialogSyncStatus, useLive } from "../lib/live";
 import { Alert, Button, Spinner, Toggle } from "../components/ui";
 
 type ChatType = "channel" | "group" | "user" | "bot" | "saved";
@@ -48,12 +48,19 @@ export function ChatsPage() {
   const [q, setQ] = useState("");
   const [kind, setKind] = useState<(typeof KINDS)[number]["key"]>("all");
   const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const [requesting, setRequesting] = useState(false);
+  // The list comes from the local copy right away; the server syncs it from
+  // Telegram in the background and reports progress in the live status.
+  const [fetchedSync, setFetchedSync] = useState<DialogSyncStatus | null>(null);
+  const sync = status?.dialogs ?? fetchedSync;
 
   const load = useCallback(async (refresh = false) => {
     try {
-      const res = await api<{ chats: ChatRow[] }>(`/api/chats${refresh ? "?refresh=true" : ""}`);
+      const res = await api<{ chats: ChatRow[]; dialogs: DialogSyncStatus }>(
+        `/api/chats${refresh ? "?refresh=true" : ""}`,
+      );
       setChats(res.chats);
+      setFetchedSync(res.dialogs);
       setError(null);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "تعذّر تحميل المحادثات.");
@@ -76,6 +83,14 @@ export function ChatsPage() {
     if (accountReady) load();
   }, [accountReady]);
 
+  // Show chats as each batch of the background sync is saved, and the final
+  // list (left chats marked) when it finishes.
+  const syncing = sync?.syncing ?? false;
+  const syncLoaded = sync?.loaded ?? 0;
+  useEffect(() => {
+    if (chats) load();
+  }, [syncing, syncLoaded]);
+
   const filtered = useMemo(() => {
     if (!chats) return [];
     const needle = fold(q.trim());
@@ -90,9 +105,9 @@ export function ChatsPage() {
   const trackedCount = chats?.filter((c) => c.tracked).length ?? 0;
 
   async function refresh() {
-    setRefreshing(true);
+    setRequesting(true);
     await load(true);
-    setRefreshing(false);
+    setRequesting(false);
   }
 
   async function act(fn: () => Promise<unknown>) {
@@ -121,7 +136,7 @@ export function ChatsPage() {
           aria-label="بحث في المحادثات"
           className="flex-1 min-w-60 rounded-lg border border-line bg-white px-4 min-h-12 text-lg focus:border-binding focus:outline-none focus:ring-2 focus:ring-binding/25"
         />
-        <Button variant="secondary" onClick={refresh} busy={refreshing}>
+        <Button variant="secondary" onClick={refresh} busy={requesting || syncing}>
           تحديث القائمة من تيليغرام
         </Button>
         <Button
@@ -150,10 +165,23 @@ export function ChatsPage() {
       </div>
 
       {error && <Alert>{error}</Alert>}
+      {!syncing && sync?.error && <Alert>{sync.error}</Alert>}
+
+      {syncing && chats && chats.length > 0 && (
+        <p role="status" className="flex items-center gap-3 text-ink-soft">
+          <Spinner className="size-5" />
+          جارٍ تحديث القائمة من تيليغرام…
+          {syncLoaded > 0 && ` (وصلت ${num(syncLoaded)} حتى الآن)`}
+        </p>
+      )}
 
       {!chats ? (
         <div className="flex items-center gap-3 text-ink-soft">
-          <Spinner className="size-5" /> جارٍ جلب المحادثات من تيليغرام…
+          <Spinner className="size-5" /> جارٍ تحميل المحادثات…
+        </div>
+      ) : chats.length === 0 && syncing ? (
+        <div className="flex items-center gap-3 text-ink-soft">
+          <Spinner className="size-5" /> جارٍ جلب المحادثات من تيليغرام… قد يستغرق ذلك بضع دقائق في الحسابات الكبيرة.
         </div>
       ) : filtered.length === 0 && status && !accountReady ? (
         <div className="flex items-center gap-3 text-ink-soft">

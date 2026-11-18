@@ -73,4 +73,5 @@ async def cancel(ctx: Container = Depends(get_ctx)):
 @router.post("/logout")
 async def logout(ctx: Container = Depends(get_ctx)):
     await _run(ctx.account.log_out())
+    await ctx.dialogs.forget()
     return ctx.account.status()

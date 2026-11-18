@@ -1,7 +1,9 @@
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from tglib.app.config import Settings
@@ -30,6 +32,18 @@ async def running_container(
         yield ctx
     finally:
         await ctx.stop()
+
+
+def sync_chats(client: TestClient, timeout: float = 5.0) -> list[dict]:
+    """Asks for a chat-list sync from Telegram (it runs in the background),
+    waits for it to finish and returns the resulting list."""
+    res = client.get("/api/chats", params={"refresh": True}).json()
+    end = time.monotonic() + timeout
+    while res["dialogs"]["syncing"]:
+        assert time.monotonic() < end, "chat sync did not finish"
+        time.sleep(0.02)
+        res = client.get("/api/chats").json()
+    return res["chats"]
 
 
 async def track(ctx: Container, chat_id: int, title: str = "chat", auto_download: bool = True) -> None:

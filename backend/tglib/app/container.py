@@ -1,12 +1,12 @@
 """Wires together the long-lived services that share the process's event loop."""
 
-import asyncio
 from collections.abc import Callable
 
 from tglib.app.config import Settings
 from tglib.app.security import AppAuth, load_secret
 from tglib.db.session import Database
 from tglib.engine.account import TelegramAccount
+from tglib.engine.dialogs import DialogSync
 from tglib.engine.downloader import DownloadEngine
 from tglib.engine.events import EventBus
 from tglib.engine.scanner import Scanner
@@ -45,8 +45,7 @@ class Container:
         # Recent search results, so a picked result can be recorded without
         # searching Telegram again: (chat_id, msg_id) -> (DocMessage, DialogInfo)
         self.search_cache: dict = {}
-        self.dialogs_synced_at = 0.0
-        self.dialogs_lock = asyncio.Lock()  # one dialog sync at a time
+        self.dialogs = DialogSync(self.db, self.account, self.events)
 
     async def start(self) -> None:
         await self.app_settings.load()
@@ -57,6 +56,7 @@ class Container:
 
     async def stop(self) -> None:
         await self.summary.stop()
+        await self.dialogs.stop()
         await self.engine.stop()
         await self.scanner.stop()
         await self.account.stop()

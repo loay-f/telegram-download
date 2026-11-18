@@ -20,7 +20,7 @@ from tglib.engine.downloader import RateLimiter
 from tglib.engine.settings_store import AppSettings
 from tglib.engine.summary import compose
 from fake_telegram import FakeFile, FakeGateway
-from helpers import all_docs, running_container, track
+from helpers import all_docs, running_container, sync_chats, track
 from test_auth import login, wait_for_state
 from test_chats_api import wait_until
 
@@ -49,7 +49,7 @@ def app(settings):
     with TestClient(create_app(settings, lambda: gw)) as c:
         login(c)
         wait_for_state(c, "ready")
-        c.get("/api/chats")
+        sync_chats(c)
         c.post("/api/chats/-1001/track", json={"tracked": True})
 
         def scanned():

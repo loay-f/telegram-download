@@ -110,6 +110,7 @@ async def snapshot(ctx: Container) -> dict:
         "engine": ctx.engine.status(),
         "scan": ctx.scanner.status(),
         "account": ctx.account.status(),
+        "dialogs": ctx.dialogs.status(),
         "stats": await ctx.stats.get(),
     }
 

@@ -1,6 +1,7 @@
 """In-memory TelegramGateway for tests."""
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -66,6 +67,11 @@ class FakeGateway(TelegramGateway):
         self.scan_calls: list[tuple[int, int]] = []  # (chat_id, min_id)
         self.get_message_calls = 0
         self.always_fail_ids: set[int] = set()  # tg_document_ids whose download always errors
+        # Dialog listing stops after this many chats until `dialogs_resume` is set
+        # (a threading.Event: tests run the app on another thread's loop).
+        self.dialogs_pause_after: int | None = None
+        self.dialogs_resume = threading.Event()
+        self.dialog_calls = 0
 
     # --- helpers for tests ---
     def add_chat(self, chat_id: int, title: str, type_: str = "channel", username: str | None = None) -> FakeChat:
@@ -150,7 +156,12 @@ class FakeGateway(TelegramGateway):
 
     # --- data ---
     async def iter_dialogs(self) -> AsyncIterator[DialogInfo]:
-        for c in self.chats.values():
+        self.dialog_calls += 1
+        self._maybe_flood("dialogs")
+        for i, c in enumerate(list(self.chats.values())):
+            if i == self.dialogs_pause_after:
+                while not self.dialogs_resume.is_set():  # polled, so cancelling works
+                    await asyncio.sleep(0.01)
             yield DialogInfo(c.id, c.title, c.username, c.type)
 
     async def iter_document_messages(

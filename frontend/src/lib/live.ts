@@ -53,7 +53,18 @@ export interface LiveStatus {
     queued: number;
   };
   account: AccountStatus;
+  dialogs: DialogSyncStatus;
   stats: Stats;
+}
+
+/** Background sync of the chat list from Telegram. */
+export interface DialogSyncStatus {
+  syncing: boolean;
+  /** A full sync has finished since the app started. */
+  synced: boolean;
+  /** Chats received so far by the running (or last) sync. */
+  loaded: number;
+  error: string | null;
 }
 
 export interface Live {
@@ -90,6 +101,11 @@ export function useLiveConnection(enabled: boolean): Live {
     es.addEventListener("status", (e) => {
       setConnected(true);
       setStatus(JSON.parse((e as MessageEvent).data));
+    });
+    // Chat-list sync progress, sooner than the next status snapshot.
+    es.addEventListener("dialogs", (e) => {
+      const dialogs = JSON.parse((e as MessageEvent).data) as DialogSyncStatus;
+      setStatus((s) => (s ? { ...s, dialogs } : s));
     });
     es.addEventListener("document", bump);
     es.addEventListener("scan_done", bump);

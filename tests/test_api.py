@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from tglib.api.status import sse
 from tglib.app.main import create_app
 from fake_telegram import FakeFile, FakeGateway
+from helpers import sync_chats
 from test_auth import login, wait_for_state
 from test_chats_api import wait_until
 
@@ -32,7 +33,7 @@ def client(settings):
         login(c)
         wait_for_state(c, "ready")
         c.post("/api/settings", json={"allowed_exts": "pdf,epub,html"})
-        c.get("/api/chats")  # syncs dialogs into the DB
+        sync_chats(c)
         for chat in (-1001, -1002):
             c.post(f"/api/chats/{chat}/settings", json={"auto_download": True})
             c.post(f"/api/chats/{chat}/track", json={"tracked": True})
