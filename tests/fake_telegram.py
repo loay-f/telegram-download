@@ -69,6 +69,8 @@ class FakeGateway(TelegramGateway):
         self.qr_scanned = asyncio.Event()  # tests set it to "scan" the QR
         self.saved_messages: list[str] = []
         self.scan_calls: list[tuple[int, int]] = []  # (chat_id, min_id)
+        self.scan_offsets: list[int] = []  # offset_id of each scan call
+        self.fail_scan_after: int | None = None  # raise NotConnected once, after this many files
         self.get_message_calls = 0
         self.always_fail_ids: set[int] = set()  # tg_document_ids whose download always errors
         # Dialog listing stops after this many chats until `dialogs_resume` is set
@@ -213,13 +215,19 @@ class FakeGateway(TelegramGateway):
         self, chat_id: int, min_id: int, offset_id: int = 0
     ) -> AsyncIterator[DocMessage]:
         self.scan_calls.append((chat_id, min_id))
+        self.scan_offsets.append(offset_id)
         if chat_id in self.inaccessible_chats or chat_id not in self.chats:
             raise ChatUnavailable(str(chat_id))
         ids = sorted(self.chats[chat_id].messages, reverse=True)
+        sent = 0
         for msg_id in ids:
             if msg_id <= min_id or (offset_id and msg_id >= offset_id):
                 continue
             self._maybe_flood("scan")
+            if self.fail_scan_after is not None and sent >= self.fail_scan_after:
+                self.fail_scan_after = None
+                raise NotConnected("connection dropped")
+            sent += 1
             yield self._to_msg(chat_id, msg_id)
 
     async def get_document_message(self, chat_id: int, msg_id: int) -> DocMessage | None:

@@ -45,6 +45,10 @@ class Chat(Base):
     # Tracking only scans; with this on, new files are also queued for download.
     auto_download: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_scanned_msg_id: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    # A scan pass that has not finished: the files from `scan_top_msg_id` down
+    # to `scan_resume_msg_id` are recorded, and it continues below that.
+    scan_top_msg_id: Mapped[int | None] = mapped_column(BigInteger)
+    scan_resume_msg_id: Mapped[int | None] = mapped_column(BigInteger)
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_scan_error: Mapped[str | None] = mapped_column(Text)
     allowed_exts: Mapped[str | None] = mapped_column(Text)

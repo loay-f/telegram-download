@@ -232,8 +232,10 @@ copy. The storage folder can be copied at any time.
   the same event loop as FastAPI.
 - **Scanning.** Each tracked chat is read newest-first with
   `InputMessagesFilterDocument` from `last_scanned_msg_id`, which advances only
-  after a complete pass; inserts are idempotent, so an interrupted scan just
-  reruns. Flood waits are slept through and the scan resumes where it stopped.
+  after a complete pass. The pass's position (`scan_top_msg_id`,
+  `scan_resume_msg_id`) is saved with every batch, so a scan cut short by a lost
+  connection or a restart continues below where it stopped, then picks up what
+  was posted since; inserts are idempotent. Flood waits are slept through.
   Tracked chats are rescanned every N hours (setting).
 - **Deduplication.** A known `tg_document_id` (forwards) only adds an
   appearance. A new document with the same size and normalized name (Arabic

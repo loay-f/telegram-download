@@ -127,3 +127,50 @@ async def test_inaccessible_chat_records_error_and_keeps_position(settings):
         await ctx.scanner.scan(-1001)
         chat = await get_chat(ctx, -1001)
         assert chat.last_scan_error and chat.last_scanned_msg_id == 0 and chat.last_scan_at
+
+
+async def test_interrupted_scan_continues_below_where_it_stopped(settings, monkeypatch):
+    monkeypatch.setattr("tglib.engine.scanner.BATCH", 2)
+    gw = library_gateway()
+    for i in range(1, 8):
+        gw.post(-1001, i, FakeFile(100 + i, f"b{i}.pdf", bytes([i])))
+    gw.fail_scan_after = 5  # 7..3 are read, then the connection drops
+    async with running_container(settings, gw) as ctx:
+        await track(ctx, -1001)
+        await ctx.scanner.scan(-1001)
+        # Two full batches were saved; the position is not final yet.
+        assert {d.tg_document_id for d in await all_docs(ctx)} == {107, 106, 105, 104}
+        chat = await get_chat(ctx, -1001)
+        assert (chat.last_scanned_msg_id, chat.scan_top_msg_id, chat.scan_resume_msg_id) == (0, 7, 4)
+        assert chat.last_scan_at is None
+
+    gw.post(-1001, 9, FakeFile(109, "b9.pdf", b"9"))  # posted while the app was down
+    async with running_container(settings, gw) as ctx:  # the app restarted
+        await ctx.scanner.scan(-1001)
+        # The rest of the old pass, then what was posted above it: nothing twice.
+        assert gw.scan_calls[-2:] == [(-1001, 0), (-1001, 7)]
+        assert gw.scan_offsets[-2:] == [4, 0]
+        assert {d.tg_document_id for d in await all_docs(ctx)} == {101, 102, 103, 104, 105, 106, 107, 109}
+        assert len(await all_appearances(ctx)) == 8
+        chat = await get_chat(ctx, -1001)
+        assert (chat.last_scanned_msg_id, chat.scan_top_msg_id, chat.scan_resume_msg_id) == (9, None, None)
+        assert chat.last_scan_at and chat.last_scan_error is None
+
+
+async def test_scan_interrupted_twice_still_finishes(settings, monkeypatch):
+    monkeypatch.setattr("tglib.engine.scanner.BATCH", 2)
+    gw = library_gateway()
+    for i in range(1, 10):
+        gw.post(-1001, i, FakeFile(100 + i, f"b{i}.pdf", bytes([i])))
+    async with running_container(settings, gw) as ctx:
+        await track(ctx, -1001)
+        gw.fail_scan_after = 4
+        await ctx.scanner.scan(-1001)
+        gw.fail_scan_after = 3
+        await ctx.scanner.scan(-1001)
+        chat = await get_chat(ctx, -1001)
+        assert (chat.last_scanned_msg_id, chat.scan_top_msg_id, chat.scan_resume_msg_id) == (0, 9, 4)
+        await ctx.scanner.scan(-1001)
+        assert len(await all_docs(ctx)) == 9
+        chat = await get_chat(ctx, -1001)
+        assert (chat.last_scanned_msg_id, chat.scan_top_msg_id, chat.scan_resume_msg_id) == (9, None, None)
