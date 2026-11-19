@@ -10,6 +10,7 @@ from tglib.engine.dialogs import DialogSync
 from tglib.engine.downloader import DownloadEngine
 from tglib.engine.events import EventBus
 from tglib.engine.history import ChatHistory
+from tglib.engine.importer import Importer
 from tglib.engine.scanner import Scanner
 from tglib.engine.settings_store import SettingsStore
 from tglib.engine.stats import ChatCounts, StatsCache
@@ -49,6 +50,7 @@ class Container:
         self.search_cache: dict = {}
         self.dialogs = DialogSync(self.db, self.account, self.events)
         self.history = ChatHistory(self.account)
+        self.importer = Importer(settings, self.db, self.events)
 
     async def start(self) -> None:
         await self.app_settings.load()
@@ -59,6 +61,7 @@ class Container:
 
     async def stop(self) -> None:
         await self.summary.stop()
+        await self.importer.stop()
         await self.dialogs.stop()
         await self.history.stop()
         await self.engine.stop()

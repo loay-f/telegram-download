@@ -58,6 +58,12 @@ export const DownloadIcon = (p: IconProps) => (
   </Icon>
 );
 
+export const FolderIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2.3h7.4a2 2 0 0 1 2 2v7.7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+  </Icon>
+);
+
 export const SettingsIcon = (p: IconProps) => (
   <Icon {...p}>
     <path d="M4 7h9" />

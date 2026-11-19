@@ -1,6 +1,6 @@
 import type { ComponentType, ReactNode, SVGProps } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { BooksIcon, ChatsIcon, DownloadIcon, HomeIcon, SearchIcon, SettingsIcon } from "./icons";
+import { BooksIcon, ChatsIcon, DownloadIcon, FolderIcon, HomeIcon, SearchIcon, SettingsIcon } from "./icons";
 
 const NAV: { to: string; label: string; icon: ComponentType<SVGProps<SVGSVGElement>>; end?: boolean }[] = [
   { to: "/", label: "الرئيسية", icon: HomeIcon, end: true },
@@ -8,6 +8,7 @@ const NAV: { to: string; label: string; icon: ComponentType<SVGProps<SVGSVGEleme
   { to: "/library", label: "المكتبة", icon: BooksIcon },
   { to: "/search", label: "البحث في تيليغرام", icon: SearchIcon },
   { to: "/queue", label: "قائمة الانتظار والأخطاء", icon: DownloadIcon },
+  { to: "/import", label: "إضافة ملفات من جهازك", icon: FolderIcon },
   { to: "/settings", label: "الإعدادات", icon: SettingsIcon },
 ];
 

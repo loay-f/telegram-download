@@ -20,6 +20,7 @@ COPY backend/requirements.txt backend/requirements.txt
 RUN pip install -r backend/requirements.txt
 
 COPY backend/ backend/
+COPY tools/ tools/
 COPY --from=frontend /src/dist frontend/dist
 
 ENV PYTHONPATH=/app/backend \

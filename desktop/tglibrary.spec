@@ -13,6 +13,8 @@ datas = [
     (str(BACKEND / "alembic.ini"), "."),
     (str(BACKEND / "alembic"), "alembic"),
     (str(ROOT / "desktop" / "icon.ico"), "."),
+    # tglib/engine/importer.py loads it from its file.
+    (str(ROOT / "tools" / "register_files.py"), "tools"),
 ]
 binaries = []
 hiddenimports = (
