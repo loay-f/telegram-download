@@ -50,6 +50,7 @@ export const NOUNS = {
   attempt: ["محاولة واحدة", "محاولتان", "محاولات", "محاولة"],
   time: ["مرة واحدة", "مرتان", "مرات", "مرة"],
   volume: ["جزء واحد", "جزءان", "أجزاء", "جزءاً"],
+  folder: ["مجلد واحد", "مجلدان", "مجلدات", "مجلداً"],
 } satisfies Record<string, Forms>;
 
 /** Arabic counted noun: "ملف واحد", "ملفان", "٥ ملفات", "١٢ ملفاً". Zero uses the "many" form. */

@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from tglib.api import auth as auth_api
 from tglib.api import chats as chats_api
 from tglib.api import documents as documents_api
+from tglib.api import imports as imports_api
 from tglib.api import search as search_api
 from tglib.api import status as status_api
 from tglib.api import telegram as telegram_api
@@ -59,6 +60,7 @@ def create_app(
     app.include_router(chats_api.router)
     app.include_router(documents_api.router)
     app.include_router(search_api.router)
+    app.include_router(imports_api.router)
     app.include_router(status_api.router)
 
     _mount_frontend(app, settings.frontend_dir)
