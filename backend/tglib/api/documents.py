@@ -24,16 +24,14 @@ def _like(value: str) -> str:
 
 
 def _text_filter(q: str):
-    """Matches the file name or any caption, ignoring Arabic spelling variants."""
+    """Matches the file name or any caption, ignoring Arabic spelling variants.
+    Both are stored already folded (`Document.search_text`), so nothing is
+    folded per row here."""
     folded = fold(q.strip())
     # Same rules as stored names; the dummy ".x" keeps a dot in the query
     # (e.g. "vol.2") from being taken as an extension.
     norm = normalize_name(q.strip() + ".x")
-    caption_hit = exists().where(
-        Appearance.document_id == Document.id,
-        func.fold(Appearance.caption).like(_like(folded), escape="\\"),
-    )
-    conds = [func.fold(Document.original_name).like(_like(folded), escape="\\"), caption_hit]
+    conds = [Document.search_text.like(_like(folded), escape="\\")]
     if norm:
         conds.append(Document.normalized_name.like(_like(norm), escape="\\"))
     return or_(*conds)
@@ -198,6 +196,28 @@ def _work_key(view: str):
     )
 
 
+async def _work_documents(s, keys: list[str], view: str, conds: list, key) -> list:
+    """(document, work key) for the documents of the works with these keys
+    that match `conds`, oldest first.
+
+    They are looked up by what a key is made of (a series, a blob, an id),
+    which is indexed. `conds` are checked on what that finds rather than put
+    in the WHERE, where SQLite may prefer to walk every document of a status."""
+    series = [k[2:] for k in keys if k.startswith("s:")]
+    units = [int(k[2:]) for k in keys if not k.startswith("s:")]
+    unit = Document.blob_id if view == "downloaded" else Document.id
+    matches = and_(*conds).label("matches")
+    found = []
+    for wanted in (
+        Document.series_key.in_(series) if series else None,
+        and_(unit.in_(units), func.coalesce(Document.series_key, "") == "") if units else None,
+    ):
+        if wanted is not None:
+            rows = await s.execute(select(Document, key, matches).where(wanted))
+            found += [(d, k) for d, k, ok in rows if ok]
+    return sorted(found, key=lambda row: row[0].id)
+
+
 def _library_conds(view, q, ext, chat_id, date_from, date_to) -> list:
     if view == "downloaded":
         conds = [Document.blob_id.is_not(None)]
@@ -229,7 +249,8 @@ async def library(
     date_to: datetime | None = None,
     sort: str = Query("recent", pattern="^(recent|name|size)$"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(30, ge=1, le=100),
+    # Large enough for the page to bring every stretch it shows up to date at once.
+    page_size: int = Query(30, ge=1, le=1000),
     ctx: Container = Depends(get_ctx),
 ):
     """Works (a single file, or the volumes of a series) matching the filters."""
@@ -253,17 +274,23 @@ async def library(
         "size": grouped.c.size.desc(),
     }[sort]
     async with ctx.db.read() as s:
-        total = (await s.execute(select(func.count()).select_from(grouped))).scalar()
-        keys = (
+        # The page and the number of works there are, from one pass over them.
+        rows = (
             await s.execute(
-                select(grouped.c.key).order_by(order, grouped.c.key).offset((page - 1) * page_size).limit(page_size)
+                select(grouped.c.key, func.count().over().label("total"))
+                .order_by(order, grouped.c.key)
+                .offset((page - 1) * page_size)
+                .limit(page_size)
             )
-        ).scalars().all()
-        docs = (
-            (await s.execute(select(Document, key).where(*conds, key.in_(keys)).order_by(Document.id))).all()
-            if keys
-            else []
-        )
+        ).all()
+        keys = [r.key for r in rows]
+        if rows:
+            total = rows[0].total
+        elif page == 1:
+            total = 0
+        else:  # a page past the end has no row to carry the total
+            total = (await s.execute(select(func.count()).select_from(grouped))).scalar()
+        docs = await _work_documents(s, keys, view, conds, key)
         apps = await _appearances(s, [d.id for d, _ in docs])
 
     by_key: dict[str, list[Document]] = {}
@@ -327,22 +354,13 @@ def _entry(d: Document, appearances: list[dict]) -> dict:
 @router.get("/library/chats")
 async def library_chats(ctx: Container = Depends(get_ctx)):
     """Chats that have files, with how many are downloaded and available."""
-    downloaded = func.count(func.distinct(Document.blob_id))
-    available = func.sum(case((Document.status == DocStatus.AVAILABLE, 1), else_=0))
+    counts = await ctx.chat_counts.get()
     async with ctx.db.read() as s:
-        rows = (
-            await s.execute(
-                select(Chat.id, Chat.title, Chat.type, downloaded.label("downloaded"), available.label("available"))
-                .join(Appearance, Appearance.chat_id == Chat.id)
-                .join(Document, Document.id == Appearance.document_id)
-                .group_by(Chat.id)
-                .order_by(Chat.title)
-            )
-        ).all()
+        rows = (await s.execute(select(Chat.id, Chat.title, Chat.type).order_by(Chat.title))).all()
     return [
-        {"id": r.id, "title": r.title, "type": r.type, "downloaded": r.downloaded, "available": int(r.available or 0)}
+        {"id": r.id, "title": r.title, "type": r.type, "downloaded": c.stored, "available": c.available}
         for r in rows
-        if r.downloaded or r.available
+        if (c := counts.get(r.id)) is not None and (c.stored or c.available)
     ]
 
 
@@ -418,4 +436,10 @@ async def get_file(doc_id: int, download: bool = False, ctx: Container = Depends
     )
 
 
-INLINE_SAFE_MIMES = {"application/pdf", "text/plain"}
+# Pictures, video and sound can't run scripts either (SVG can: it stays out).
+INLINE_SAFE_MIMES = {
+    "application/pdf", "text/plain",
+    "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp",
+    "video/mp4", "video/webm",
+    "audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav", "audio/x-wav", "audio/flac", "audio/aac",
+}

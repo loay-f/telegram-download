@@ -1,6 +1,36 @@
 import { NOUNS, count, digits, duration } from "./format";
 import type { LiveStatus } from "./live";
 
+export const CHAT_TYPE_LABEL: Record<string, string> = {
+  channel: "قناة",
+  group: "مجموعة",
+  user: "محادثة خاصة",
+  bot: "بوت",
+  saved: "",
+};
+
+export const MEDIA_LABEL: Record<string, string> = {
+  photo: "صورة",
+  video: "فيديو",
+  round: "رسالة فيديو",
+  gif: "صورة متحركة",
+  sticker: "ملصق",
+  voice: "رسالة صوتية",
+  audio: "ملف صوتي",
+  file: "ملف",
+  poll: "استطلاع",
+  location: "موقع",
+  contact: "جهة اتصال",
+  other: "محتوى لا يُعرض هنا",
+};
+
+/** What a message says, in one line: its file's name and its text, or
+ * failing both the kind of thing it carries. */
+export function messagePreview(m: { text: string; media: { kind: string; name: string | null } | null }): string {
+  const text = [m.media?.kind === "file" ? m.media.name : null, m.text].filter(Boolean).join(" · ");
+  return text || MEDIA_LABEL[m.media?.kind ?? ""] || MEDIA_LABEL.other;
+}
+
 export const STATUS_LABEL: Record<string, string> = {
   available: "متاح للتنزيل",
   pending: "في الانتظار",

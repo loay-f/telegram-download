@@ -71,10 +71,20 @@ docker compose up -d --build
 - اذهب إلى **المحادثات** وفعّل متابعة القنوات أو المجموعات أو المحادثات الخاصة التي تريد كتبها.
   المتابعة **تفحص فقط**: تظهر الملفات في **المكتبة ← متاحة للتنزيل**، وتختار أنت ما يُنزَّل (ملفاً
   ملفاً، أو كل ملفات محادثة). ويمكن تفعيل «نزّل الملفات الجديدة تلقائياً» لمحادثة بعينها من «خيارات».
+- **اقرأ الرسائل** (بجانب كل محادثة): يعرض رسائل القناة أو المجموعة أو المحادثة الخاصة للقراءة فقط،
+  مع الصور، ويمكن تنزيل أي ملف فيها إلى المكتبة. لا يُرسل شيئاً ولا يعلّم الرسائل كمقروءة.
+  زر البحث (العدسة) أعلى المحادثة يبحث في نص رسائلها وأسماء ملفاتها، والضغط على نتيجة يفتح
+  الرسالة في موضعها من المحادثة.
+- مربع البحث في صفحة **المحادثات** يجد المحادثات بأسمائها، ويبحث كذلك في رسائل وملفات كل محادثاتك،
+  ويعرض النتائج في ثلاثة أقسام: المحادثات، الرسائل، الملفات. الضغط على رسالة يفتحها في محادثتها.
 - **البحث في تيليغرام**: ابحث باسم كتاب في كل محادثاتك، أو الصق رابط رسالة (`t.me/...`) لتنزيل ملفها.
 - الكتب تُحفظ على القرص في مجلد لكل محادثة: `library/<اسم المحادثة>/<اسم الملف>`.
 - في **المكتبة**: تصفّح حسب المحادثة، والأجزاء المتعددة لكتاب واحد تظهر معاً، وصور الأغلفة، وقارئ
   مدمج لملفات PDF و EPUB، وحذف كتاب.
+- **أنواع الملفات** (في الإعدادات): الكتب والمستندات، الصور، الفيديو، الصوتيات، الملفات المضغوطة — كلها
+  مفعّلة افتراضياً، ولكل نوع مفتاح تشغيل وإيقاف، وداخله «استثنِ بعض الأنواع» لترك صيغ بعينها (مثل GIF).
+  الملفات المعروضة غير المنزّلة من صيغة مستثناة تختفي من القائمة وتعود إن سُمح بها مجدداً؛ ما نُزّل لا يُحذف.
+  ويمكن اختيار أنواع خاصة بمحادثة بعينها من «خيارات».
 - في **الإعدادات**: ساعات التنزيل، وحد السرعة، والملخص اليومي في «الرسائل المحفوظة». يبدأ الفحص والتنزيل تلقائياً.
 
 يعمل البرنامج في الخلفية ويعود للعمل تلقائياً بعد إعادة تشغيل الجهاز (ما دام Docker Desktop
@@ -181,12 +191,28 @@ Open <http://127.0.0.1:8000>, enter the app password, then log in to Telegram
   as *available* in the Library and downloaded when you pick them (one by one,
   a selection, or a whole chat). A per-chat option downloads new files
   automatically.
+- **اقرأ الرسائل** (Read messages, next to each chat) shows the messages of a
+  channel, group or private chat, read-only: text, pictures, replies and
+  forwards, with a button to add any file to the library. Nothing is sent or
+  marked as read, and messages aren't stored: pages are fetched from Telegram
+  as you scroll. The magnifier button at the top searches the chat's message
+  text and file names (Telegram's own search); picking a result opens that
+  message in its place in the chat.
+- The search box on **المحادثات** (Chats) finds chats by name and also searches
+  the messages and files of all your chats, in three sections: chats, messages,
+  files. The type tabs narrow all three. Picking a message opens it in its chat.
 - **البحث في تيليغرام** (Search) finds files across all your chats, and
   downloads the file from a pasted `t.me` message link.
 - Files are stored as `library/<chat name>/<file name>`, once per unique
   content (in the chat where it was first posted).
 - The Library browses by chat, groups multi-volume works, shows cover
   thumbnails, has a built-in PDF/EPUB reader, and can delete books.
+- **File types** (in Settings) are chosen by kind — books and documents,
+  pictures, video, audio, archives — each with an on/off switch, all on by
+  default; inside a kind, «استثنِ بعض الأنواع» leaves single formats out.
+  Listed files of an excluded format leave the list (and return if it is
+  allowed again); nothing already downloaded is removed. A chat can have its own
+  choice under «خيارات». Photos, videos and audio open inside the app too.
 - Settings include download hours, a speed limit and a daily summary sent to
   your Saved Messages.
 
@@ -223,26 +249,47 @@ copy. The storage folder can be copied at any time.
 - **One process.** Telethon allows a single client per session, so uvicorn runs
   one worker; the scanner, scheduler and download workers are asyncio tasks in
   the same event loop as FastAPI.
-- **Scanning.** Each tracked chat is read newest-first with
-  `InputMessagesFilterDocument` from `last_scanned_msg_id`, which advances only
-  after a complete pass; inserts are idempotent, so an interrupted scan just
-  reruns. Flood waits are slept through and the scan resumes where it stopped.
-  Tracked chats are rescanned every N hours (setting).
+- **Scanning.** Telegram lists a chat's files, its photos and videos, and its
+  audio separately (`InputMessagesFilterDocument` / `PhotoVideo` / `Music`), so
+  each is a pass of its own with its own position on the chat row; a pass runs
+  only if the chat accepts a file type of that kind. Each pass reads
+  newest-first from its floor (`last_scanned_msg_id` for files), which advances
+  only after a complete pass. The pass's position (`scan_top_msg_id`,
+  `scan_resume_msg_id`) is saved with every batch, so a scan cut short by a lost
+  connection or a restart continues below where it stopped, then picks up what
+  was posted since; inserts are idempotent. Flood waits are slept through.
+  Tracked chats are rescanned every N hours (setting). A batch of 100 messages
+  is recorded with a handful of statements (what it needs is read with a few
+  queries, what it adds is inserted together), because the single write
+  connection is shared with the downloads. Requests are paced by
+  `SCAN_REQUEST_INTERVAL` in `engine/telegram.py`.
 - **Deduplication.** A known `tg_document_id` (forwards) only adds an
   appearance. A new document with the same size and normalized name (Arabic
   letter variants, tashkeel, `@channel` tags, separators folded) is a duplicate
   and is never downloaded. After download, identical SHA-256 content is a
   duplicate too, and only one copy stays on disk.
-- **Downloads.** N workers claim jobs atomically (priority, then age). Each
-  download re-fetches its message for a fresh file reference, falls back to
-  other appearances if the message was deleted, and writes to
+- **Downloads.** N workers claim jobs atomically (priority, then age; the
+  `ix_documents_claim` index holds the queue in that order). Each download
+  needs a fresh copy of its message for a valid file reference: the request
+  that fetches it also brings the messages of the files queued next in the
+  same chat, so a run of small files costs one such request per hundred. It
+  falls back to other appearances if the message was deleted, and writes to
   `tmp/{id}.part`. Data is fsynced before progress is recorded; on restart the
-  file is truncated to the last durable 512 KiB boundary and continued.
+  file is truncated to the last durable 512 KiB boundary and continued. The
+  content is hashed as it arrives (a resumed file is read again instead).
+  By default the pieces of a file are requested one after the other; the
+  advanced setting «أجزاء الملف الواحد التي تُطلب معاً» asks for several at
+  once, which can be faster for big files or bring flood waits (experimental).
   Flood waits pause all workers; disk-full pauses the engine; network errors
   back off without counting attempts; other errors retry with exponential
   backoff up to a maximum, then mark the file failed.
+- **Library search.** A document's name and the captions it was posted with
+  are stored folded in `documents.search_text` (filled at startup for older
+  rows), so a search compares text and folds nothing per row.
 - **Realtime.** `GET /api/events` streams a status snapshot every second
   (progress, speed, engine state, scan progress, counters) plus change events.
+  The UI renders a snapshot only when it differs from the last one, and
+  refetches lists at most every few seconds while files keep finishing.
 
 ### Development
 

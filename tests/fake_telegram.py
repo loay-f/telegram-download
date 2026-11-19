@@ -1,8 +1,9 @@
 """In-memory TelegramGateway for tests."""
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from tglib.engine.errors import (
@@ -14,9 +15,11 @@ from tglib.engine.errors import (
     PasswordNeeded,
 )
 from tglib.engine.telegram import (
+    ChatMessage,
     DialogInfo,
     DocMessage,
     DocumentInfo,
+    MediaInfo,
     MeInfo,
     SentCodeInfo,
     TelegramGateway,
@@ -31,6 +34,9 @@ class FakeFile:
     name: str
     content: bytes
     mime: str = "application/pdf"
+    # How Telegram files it: "file" (sent as a file), "media" (a photo or a
+    # video; a photo has no name) or "audio".
+    kind: str = "file"
 
 
 @dataclass
@@ -41,6 +47,8 @@ class FakeChat:
     username: str | None = None
     # msg_id -> (FakeFile, caption)
     messages: dict[int, tuple[FakeFile, str | None]] = field(default_factory=dict)
+    # msg_id -> message without a library file (text, photos, service notices)
+    talk: dict[int, ChatMessage] = field(default_factory=dict)
 
 
 class FakeGateway(TelegramGateway):
@@ -57,6 +65,7 @@ class FakeGateway(TelegramGateway):
         self.download_delay = 0.0
         self.block_download: asyncio.Event | None = None  # downloads wait on this
         self.downloads_started: list[tuple[int, int]] = []  # (tg_document_id, offset)
+        self.download_streams: list[int] = []  # `streams` asked for by each download
         self.inaccessible_chats: set[int] = set()
         self.codes_sent = 0
         self.qr_tokens = 0
@@ -64,8 +73,28 @@ class FakeGateway(TelegramGateway):
         self.qr_scanned = asyncio.Event()  # tests set it to "scan" the QR
         self.saved_messages: list[str] = []
         self.scan_calls: list[tuple[int, int]] = []  # (chat_id, min_id)
+        self.scan_offsets: list[int] = []  # offset_id of each scan call
+        self.kind_scan_calls: list[tuple[int, str, int]] = []  # passes over photos/videos and audio: (chat_id, kind, min_id)
+        self.fail_scan_after: int | None = None  # raise NotConnected once, after this many files
         self.get_message_calls = 0
+        self.message_requests: list[tuple[int, list[int]]] = []  # get_document_messages (chat_id, msg_ids)
         self.always_fail_ids: set[int] = set()  # tg_document_ids whose download always errors
+        # Dialog listing stops after this many chats until `dialogs_resume` is set
+        # (a threading.Event: tests run the app on another thread's loop).
+        self.dialogs_pause_after: int | None = None
+        self.dialogs_resume = threading.Event()
+        self.dialog_calls = 0
+        # Reading chats
+        self.history_calls: list[tuple[int, int, int, int]] = []  # (chat_id, offset_id, min_id, limit)
+        self.message_calls: list[tuple[int, int]] = []  # get_message (chat_id, msg_id)
+        self.preview_calls: list[tuple[int, int, bool]] = []  # (chat_id, msg_id, full)
+        self.pictures: dict[tuple[int, int], bytes] = {}  # (chat_id, msg_id) -> image
+        # Messages handed out before this was last bumped have expired file references.
+        self.ref_generation = 0
+        self.history_delay = 0.0
+        self.after_calls: list[tuple[int, int, int]] = []  # get_history_after (chat_id, after_id, limit)
+        self.search_calls: list[tuple[int, str, int, int]] = []  # (chat_id, query, offset_id, limit)
+        self.global_search_calls: list[tuple[str, int]] = []  # search_messages (query, limit)
 
     # --- helpers for tests ---
     def add_chat(self, chat_id: int, title: str, type_: str = "channel", username: str | None = None) -> FakeChat:
@@ -75,6 +104,39 @@ class FakeGateway(TelegramGateway):
     def post(self, chat_id: int, msg_id: int, f: FakeFile, caption: str | None = None) -> None:
         self.chats[chat_id].messages[msg_id] = (f, caption)
 
+    def say(self, chat_id: int, msg_id: int, text: str = "", **fields) -> ChatMessage:
+        """Adds a message to read: text by default; pass `media`, `service`,
+        `sender`, `out`... for anything else."""
+        defaults = dict(
+            entities=[], out=False, sender=None, reply_to=None, forwarded_from=None,
+            edited=False, service=None, media=None,
+        )
+        msg = ChatMessage(
+            chat_id=chat_id, id=msg_id, date=self.base_date + timedelta(minutes=msg_id), text=text,
+            **{**defaults, **fields},
+        )
+        self.chats[chat_id].talk[msg_id] = msg
+        return msg
+
+    def show(self, chat_id: int, msg_id: int, picture: bytes, kind: str = "photo") -> ChatMessage:
+        """Adds a photo (or a video with this thumbnail)."""
+        self.pictures[(chat_id, msg_id)] = picture
+        return self.say(chat_id, msg_id, media=MediaInfo(kind, width=320, height=200, has_preview=True))
+
+    def _chat_message(self, chat_id: int, msg_id: int) -> ChatMessage | None:
+        chat = self.chats[chat_id]
+        if msg_id in chat.talk:
+            return replace(chat.talk[msg_id], handle=self.ref_generation)
+        if msg_id not in chat.messages:
+            return None
+        dm = self._to_msg(chat_id, msg_id)
+        d = dm.document
+        return ChatMessage(
+            chat_id=chat_id, id=msg_id, date=dm.date, text=dm.caption or "", entities=[], out=False,
+            sender=None, reply_to=None, forwarded_from=None, edited=False, service=None,
+            media=MediaInfo("file", name=d.file_name, size=d.size, document=d),
+        )
+
     def _maybe_flood(self, op: str) -> None:
         if op in self.flood_on_next:
             raise FloodWait(self.flood_on_next.pop(op))
@@ -82,12 +144,14 @@ class FakeGateway(TelegramGateway):
     def _to_msg(self, chat_id: int, msg_id: int) -> DocMessage:
         f, caption = self.chats[chat_id].messages[msg_id]
         ext = "." + f.name.rsplit(".", 1)[1].lower() if "." in f.name else None
+        # A photo is filed without a name; "x.jpg" here only says what it is.
+        name = None if f.kind == "media" and f.mime.startswith("image/") else f.name
         return DocMessage(
             chat_id=chat_id,
             msg_id=msg_id,
             date=self.base_date + timedelta(minutes=msg_id),
             caption=caption,
-            document=DocumentInfo(f.tg_document_id, f.name, ext, f.mime, len(f.content)),
+            document=DocumentInfo(f.tg_document_id, name, ext, f.mime, len(f.content)),
             handle=f,
         )
 
@@ -150,20 +214,36 @@ class FakeGateway(TelegramGateway):
 
     # --- data ---
     async def iter_dialogs(self) -> AsyncIterator[DialogInfo]:
-        for c in self.chats.values():
+        self.dialog_calls += 1
+        self._maybe_flood("dialogs")
+        for i, c in enumerate(list(self.chats.values())):
+            if i == self.dialogs_pause_after:
+                while not self.dialogs_resume.is_set():  # polled, so cancelling works
+                    await asyncio.sleep(0.01)
             yield DialogInfo(c.id, c.title, c.username, c.type)
 
     async def iter_document_messages(
-        self, chat_id: int, min_id: int, offset_id: int = 0
+        self, chat_id: int, min_id: int, offset_id: int = 0, kind: str = "file"
     ) -> AsyncIterator[DocMessage]:
-        self.scan_calls.append((chat_id, min_id))
+        if kind == "file":
+            self.scan_calls.append((chat_id, min_id))
+            self.scan_offsets.append(offset_id)
+        else:
+            self.kind_scan_calls.append((chat_id, kind, min_id))
         if chat_id in self.inaccessible_chats or chat_id not in self.chats:
             raise ChatUnavailable(str(chat_id))
         ids = sorted(self.chats[chat_id].messages, reverse=True)
+        sent = 0
         for msg_id in ids:
             if msg_id <= min_id or (offset_id and msg_id >= offset_id):
                 continue
+            if self.chats[chat_id].messages[msg_id][0].kind != kind:
+                continue
             self._maybe_flood("scan")
+            if self.fail_scan_after is not None and sent >= self.fail_scan_after:
+                self.fail_scan_after = None
+                raise NotConnected("connection dropped")
+            sent += 1
             yield self._to_msg(chat_id, msg_id)
 
     async def get_document_message(self, chat_id: int, msg_id: int) -> DocMessage | None:
@@ -174,6 +254,10 @@ class FakeGateway(TelegramGateway):
         if msg_id not in self.chats[chat_id].messages:
             return None
         return self._to_msg(chat_id, msg_id)
+
+    async def get_document_messages(self, chat_id: int, msg_ids) -> dict[int, DocMessage]:
+        self.message_requests.append((chat_id, list(msg_ids)))
+        return await super().get_document_messages(chat_id, msg_ids)
 
     def _dialog(self, chat_id: int) -> DialogInfo:
         c = self.chats[chat_id]
@@ -202,11 +286,74 @@ class FakeGateway(TelegramGateway):
     async def send_to_saved(self, text: str) -> None:
         self.saved_messages.append(text)
 
+    # --- reading a chat ---
+    def _require_chat(self, chat_id: int) -> FakeChat:
+        if chat_id in self.inaccessible_chats or chat_id not in self.chats:
+            raise ChatUnavailable(str(chat_id))
+        return self.chats[chat_id]
+
+    async def get_history(self, chat_id: int, *, offset_id: int = 0, min_id: int = 0, limit: int = 50):
+        self.history_calls.append((chat_id, offset_id, min_id, limit))
+        if self.history_delay:
+            await asyncio.sleep(self.history_delay)
+        self._maybe_flood("history")
+        chat = self._require_chat(chat_id)
+        ids = sorted({*chat.talk, *chat.messages}, reverse=True)
+        ids = [i for i in ids if i > min_id and (not offset_id or i < offset_id)]
+        return [self._chat_message(chat_id, i) for i in ids[:limit]]
+
+    async def get_history_after(self, chat_id: int, after_id: int, limit: int = 50):
+        self.after_calls.append((chat_id, after_id, limit))
+        self._maybe_flood("history")
+        chat = self._require_chat(chat_id)
+        ids = sorted(i for i in {*chat.talk, *chat.messages} if i > after_id)
+        return [self._chat_message(chat_id, i) for i in reversed(ids[:limit])]
+
+    async def search_history(self, chat_id: int, query: str, *, offset_id: int = 0, limit: int = 50):
+        self.search_calls.append((chat_id, query, offset_id, limit))
+        self._maybe_flood("search")
+        chat = self._require_chat(chat_id)
+        found = []
+        for i in sorted({*chat.talk, *chat.messages}, reverse=True):
+            m = self._chat_message(chat_id, i)
+            text = f"{m.text} {m.media.name if m.media and m.media.name else ''}"
+            if query.lower() in text.lower() and (not offset_id or i < offset_id):
+                found.append(m)
+        return found[:limit]
+
+    async def search_messages(self, query: str, limit: int):
+        self.global_search_calls.append((query, limit))
+        self._maybe_flood("search")
+        found = []
+        for chat in self.chats.values():
+            if chat.id in self.inaccessible_chats:
+                continue
+            for i in {*chat.talk, *chat.messages}:
+                m = self._chat_message(chat.id, i)
+                text = f"{m.text} {m.media.name if m.media and m.media.name else ''}"
+                if query.lower() in text.lower():
+                    found.append(replace(m, chat=self._dialog(chat.id)))
+        found.sort(key=lambda m: (m.date, m.chat_id), reverse=True)
+        return found[:limit]
+
+    async def get_message(self, chat_id: int, msg_id: int) -> ChatMessage | None:
+        self.message_calls.append((chat_id, msg_id))
+        self._require_chat(chat_id)
+        return self._chat_message(chat_id, msg_id)
+
+    async def download_preview(self, message: ChatMessage, full: bool) -> bytes | None:
+        self.preview_calls.append((message.chat_id, message.id, full))
+        self._maybe_flood("preview")
+        if message.handle != self.ref_generation:
+            raise FileRefExpired("expired")
+        return self.pictures.get((message.chat_id, message.id))
+
     async def iter_download(
-        self, message: DocMessage, offset: int, request_size: int
+        self, message: DocMessage, offset: int, request_size: int, streams: int = 1
     ) -> AsyncIterator[bytes]:
         f: FakeFile = message.handle
         self.downloads_started.append((f.tg_document_id, offset))
+        self.download_streams.append(streams)
         self._maybe_flood("download")
         if f.tg_document_id in self.always_fail_ids:
             raise RuntimeError("simulated server error")

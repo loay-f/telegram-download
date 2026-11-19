@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from tglib.api.deps import get_ctx, require_auth
 from tglib.app.container import Container
-from tglib.engine.catalog import reapply_filters
+from tglib.engine.catalog import hide_rejected, reapply_filters
 from tglib.engine.stats import compute_stats
 
 router = APIRouter(prefix="/api", tags=["status"], dependencies=[Depends(require_auth)])
@@ -40,6 +40,7 @@ async def get_settings(ctx: Container = Depends(get_ctx)):
         "allowed_exts": s.allowed_exts,
         "max_size_mb": s.max_size_mb,
         "workers": s.workers,
+        "download_streams": s.download_streams,
         "scan_interval_hours": s.scan_interval_hours,
         "max_attempts": s.max_attempts,
         "speed_limit_kbps": s.speed_limit_kbps,
@@ -58,6 +59,7 @@ class SettingsIn(BaseModel):
     allowed_exts: str | None = None
     max_size_mb: int | None = Field(default=None, ge=0)
     workers: int | None = Field(default=None, ge=1, le=10)
+    download_streams: int | None = Field(default=None, ge=1, le=8)
     scan_interval_hours: int | None = Field(default=None, ge=1, le=168)
     max_attempts: int | None = Field(default=None, ge=1, le=50)
     speed_limit_kbps: int | None = Field(default=None, ge=0)
@@ -74,15 +76,15 @@ async def update_settings(body: SettingsIn, ctx: Container = Depends(get_ctx)):
     before = ctx.app_settings.current
     changes = {k: int(v) if isinstance(v, bool) else v for k, v in body.model_dump(exclude_none=True).items()}
     after = await ctx.app_settings.update(changes)
-    reopened = 0
+    reopened = hidden = 0
     if (before.allowed_exts, before.max_size_mb) != (after.allowed_exts, after.max_size_mb):
         async with ctx.db.write() as s:
             reopened = await reapply_filters(s, after)
-        if reopened:
-            ctx.engine.wake()
-    ctx.engine.wake()  # a new schedule may allow downloading right now
+            hidden = await hide_rejected(s, after)
+    ctx.engine.wake()  # newly allowed files, or a new schedule, may start downloading right now
     result = await get_settings(ctx)
-    result["reopened"] = reopened
+    result["reopened"] = reopened  # files that were skipped and are allowed now
+    result["hidden"] = hidden  # listed files whose type is excluded now
     return result
 
 
@@ -110,6 +112,7 @@ async def snapshot(ctx: Container) -> dict:
         "engine": ctx.engine.status(),
         "scan": ctx.scanner.status(),
         "account": ctx.account.status(),
+        "dialogs": ctx.dialogs.status(),
         "stats": await ctx.stats.get(),
     }
 

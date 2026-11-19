@@ -76,6 +76,11 @@ class Database:
         _configure(self.write_engine, immediate=True)
         self._read = async_sessionmaker(self.read_engine, expire_on_commit=False)
         self._write = async_sessionmaker(self.write_engine, expire_on_commit=False)
+        # Counters of committed writes, for caches of what the tables hold:
+        # `writes` counts all of them, `version` those that may change what
+        # lists and counters show (everything but `minor` bookkeeping).
+        self.writes = 0
+        self.version = 0
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
@@ -86,12 +91,17 @@ class Database:
             await complete(s.close())
 
     @asynccontextmanager
-    async def write(self) -> AsyncIterator[AsyncSession]:
-        """Transaction that commits on success and rolls back on error."""
+    async def write(self, *, minor: bool = False) -> AsyncIterator[AsyncSession]:
+        """Transaction that commits on success and rolls back on error.
+        `minor`: bookkeeping that changes nothing a list or a counter shows
+        (download progress), so what was computed from the tables stays valid."""
         s = self._write()
         try:
             yield s
             await complete(s.commit())
+            self.writes += 1
+            if not minor:
+                self.version += 1
         except BaseException:
             await complete(s.rollback())
             raise

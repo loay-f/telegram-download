@@ -64,7 +64,7 @@ export default function EpubView({ docId }: { docId: number }) {
       <div className="relative flex-1 min-h-0 bg-white">
         <div ref={host} className="absolute inset-0 mx-auto max-w-3xl px-4" />
         {state === "loading" && (
-          <div className="absolute inset-0 grid place-items-center text-binding">
+          <div className="absolute inset-0 grid place-items-center text-accent">
             <Spinner className="size-8" />
           </div>
         )}

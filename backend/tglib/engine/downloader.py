@@ -8,6 +8,11 @@ Crash safety:
   between only causes a re-download that lands on the same path.
 - Flood waits, disconnects, disk-full and pause release the job back to
   `pending` without counting an attempt.
+
+Small files (photos) are mostly overhead, so each one costs as little as it
+can: the messages of the files queued next in a chat are fetched together
+with the one that is needed, the content is hashed as it arrives, and a file
+that completes is recorded once, when it lands in the library.
 """
 
 import asyncio
@@ -27,7 +32,14 @@ from sqlalchemy import func, select, update
 from tglib.db.models import Appearance, Blob, Chat, Document, DocStatus, Setting, utcnow
 from tglib.db.session import Database
 from tglib.engine.account import TelegramAccount
-from tglib.engine.catalog import DELETED, backfill_series, request_download
+from tglib.engine.catalog import (
+    DELETED,
+    backfill_search_text,
+    backfill_series,
+    reapply_filters,
+    request_chat_download,
+    request_download,
+)
 from tglib.engine.errors import ChatUnavailable, FileRefExpired, FloodWait, NotAuthorized, NotConnected
 from tglib.engine.events import EventBus
 from tglib.engine.settings_store import SettingsStore
@@ -48,6 +60,10 @@ PERSIST_SECONDS = 3.0
 DISK_MARGIN = 200 * 1024 * 1024
 OFFLINE_RETRY_SECONDS = 30
 MAX_REF_REFRESH = 3
+SOURCE_BATCH = 100  # messages Telegram returns in one request
+SOURCE_LOOKAHEAD = 300  # how far down the queue files of the same chat are looked for
+SOURCE_TTL = 300.0  # seconds a fetched message (its file reference) is kept for its turn
+SOURCES_MAX = 2000
 PAUSED_KEY = "engine_paused"
 
 MSG_NO_SOURCE = "لم يعد الملف متاحاً: حُذفت الرسالة أو لم يعد الوصول إلى المحادثة ممكناً."
@@ -177,6 +193,11 @@ class DownloadEngine:
         self._supervisor: asyncio.Task | None = None
         self._stopping = False
         self._limiter = RateLimiter(lambda: self._settings.current.speed_limit_kbps * 1024)
+        # Fresh messages of files queued next, fetched along with another
+        # file's: tg_document_id -> (message, time.monotonic() it expires at).
+        self._sources: dict[int, tuple[DocMessage, float]] = {}
+        self._sources_login = 0.0  # `account.ready_at` they were fetched under
+        self._source_locks: dict[int, asyncio.Lock] = {}  # per chat
 
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -190,8 +211,16 @@ class DownloadEngine:
             row = await s.get(Setting, PAUSED_KEY)
             self.paused = bool(row and row.value == "1")
             filled = await backfill_series(s)
+            searchable = await backfill_search_text(s)
+            # The allowed types may have grown since these were skipped (a new
+            # version's defaults): let them back in.
+            reopened = await reapply_filters(s, self._settings.current)
         if filled:
             log.info("Computed volume info for %s documents", filled)
+        if searchable:
+            log.info("Prepared %s documents for searching", searchable)
+        if reopened:
+            log.info("%s documents skipped by the old file types are allowed now", reopened)
         await self._cleanup_tmp()
         await self._relayout_legacy()
         self._supervisor = asyncio.create_task(self._supervise(), name="download-supervisor")
@@ -283,6 +312,14 @@ class DownloadEngine:
         if result.queued or to_front:
             self.wake()
         return result
+
+    async def request_chat(self, chat_id: int) -> int:
+        """Queues every file of the chat that is only listed. Returns how many."""
+        async with self._db.write() as s:
+            queued = await request_chat_download(s, chat_id)
+        if queued:
+            self.wake()
+        return queued
 
     async def retry(self, doc_id: int) -> bool:
         async with self._db.read() as s:
@@ -471,8 +508,8 @@ class DownloadEngine:
             if source is None:
                 await self._fail(job, MSG_NO_SOURCE, permanent=True)
                 return
-            await self._download(job, source, part)
-            await self._finalize(job, part)
+            sha = await self._download(job, source, part)
+            await self._finalize(job, part, sha)
         except _Interrupted as e:
             if e.reason == "cancel":
                 await self._release(job, part, status=DocStatus.AVAILABLE)
@@ -525,8 +562,13 @@ class DownloadEngine:
         self.disk_full = "مساحة التخزين ممتلئة. أفرغ مساحة على القرص ثم اضغط «استئناف»."
         self._publish_state()
 
-    async def _find_source(self, job: Job) -> DocMessage | None:
-        """A fresh message (with a valid file reference) carrying this document."""
+    async def _find_source(self, job: Job, fresh: bool = False) -> DocMessage | None:
+        """A message (with a valid file reference) carrying this document.
+        The request that fetches it also asks for the messages of the files
+        queued next in the same chat, which then need no request of their own;
+        `fresh` asks Telegram again whatever is kept (the reference expired)."""
+        if not fresh and (dm := self._kept_source(job.tg_document_id)) is not None:
+            return dm
         async with self._db.read() as s:
             apps = (
                 await s.execute(
@@ -537,15 +579,84 @@ class DownloadEngine:
             ).all()
         gw = self._account.gateway
         for chat_id, msg_id in apps:
-            try:
-                dm = await gw.get_document_message(chat_id, msg_id)
-            except ChatUnavailable:
-                continue
+            # One request per chat at a time: a worker waiting here usually
+            # finds its message was brought by the request it waited for.
+            async with self._source_locks.setdefault(chat_id, asyncio.Lock()):
+                if not fresh and (dm := self._kept_source(job.tg_document_id)) is not None:
+                    return dm
+                wanted = [msg_id] if fresh else [msg_id, *await self._queued_next(chat_id, job.id)]
+                try:
+                    found = await gw.get_document_messages(chat_id, wanted)
+                except ChatUnavailable:
+                    continue
+                self._keep_sources(dm for mid, dm in found.items() if mid != msg_id)
+            dm = found.get(msg_id)
             if dm is not None and dm.document.tg_document_id == job.tg_document_id:
                 return dm
         return None
 
-    async def _download(self, job: Job, source: DocMessage, part: Path) -> None:
+    async def _queued_next(self, chat_id: int, doc_id: int) -> list[int]:
+        """Messages in `chat_id` of the files that need one soon: those other
+        workers have just claimed, then those at the front of the queue. The
+        ones a message is already kept for are left out."""
+        now = time.monotonic()
+        async with self._db.read() as s:
+            claimed = await s.execute(
+                select(Document.id, Document.tg_document_id).where(
+                    Document.status == DocStatus.DOWNLOADING, Document.id != doc_id
+                )
+            )
+            front = await s.execute(
+                select(Document.id, Document.tg_document_id)
+                .where(Document.status == DocStatus.PENDING)
+                .order_by(Document.priority.desc(), Document.first_seen_at, Document.id)
+                .limit(SOURCE_LOOKAHEAD)
+            )
+            wanted = [
+                doc
+                for doc, tg_id in (*claimed.all(), *front.all())
+                if (kept := self._sources.get(tg_id)) is None or kept[1] <= now
+            ]
+            if not wanted:
+                return []
+            # Looked up by document alone, which is indexed and returns a few
+            # hundred rows at most; asked for the chat as well, SQLite may
+            # read every post of a big chat instead.
+            posts = await s.execute(
+                select(Appearance.document_id, Appearance.msg_id, Appearance.chat_id).where(
+                    Appearance.document_id.in_(wanted)
+                )
+            )
+            here: dict[int, int] = {}
+            for doc, msg_id, chat in posts:
+                if chat == chat_id:
+                    here.setdefault(doc, msg_id)
+        return [here[doc] for doc in wanted if doc in here][: SOURCE_BATCH - 1]
+
+    def _same_login(self) -> None:
+        if self._sources_login != self._account.ready_at:
+            self._sources.clear()  # a new login, maybe of another account
+            self._sources_login = self._account.ready_at
+
+    def _kept_source(self, tg_document_id: int) -> DocMessage | None:
+        self._same_login()
+        kept = self._sources.pop(tg_document_id, None)
+        return kept[0] if kept is not None and kept[1] > time.monotonic() else None
+
+    def _keep_sources(self, messages) -> None:
+        self._same_login()
+        now = time.monotonic()
+        for dm in messages:
+            self._sources[dm.document.tg_document_id] = (dm, now + SOURCE_TTL)
+        if len(self._sources) > SOURCES_MAX:
+            self._sources = {k: v for k, v in self._sources.items() if v[1] > now}
+            for k in list(self._sources)[: max(0, len(self._sources) - SOURCES_MAX)]:
+                del self._sources[k]
+
+    async def _download(self, job: Job, source: DocMessage, part: Path) -> str | None:
+        """Fetches the rest of the file into `part`. Returns the content's
+        sha256 when all of it passed through here (nothing was resumed), so
+        the file isn't read again just to hash it."""
         have = part.stat().st_size if part.exists() else 0
         offset = resume_offset(have, job.bytes_downloaded)
         if have and offset:
@@ -559,15 +670,21 @@ class DownloadEngine:
             durable = offset
             last_persist = time.monotonic()
             refreshes = 0
+            hasher = hashlib.sha256() if offset == 0 else None
+            complete = False
             try:
                 while offset < job.size:
                     try:
                         async with aclosing(
-                            self._account.gateway.iter_download(source, offset, CHUNK)
+                            self._account.gateway.iter_download(
+                                source, offset, CHUNK, self._settings.current.download_streams
+                            )
                         ) as stream:
                             async for chunk in stream:
                                 await self._limiter.take(len(chunk))
                                 f.write(chunk)
+                                if hasher is not None:
+                                    hasher.update(chunk)
                                 offset += len(chunk)
                                 active.done = offset
                                 if (
@@ -587,29 +704,38 @@ class DownloadEngine:
                         log.info("File reference expired for %s; re-fetching message", job.id)
                         await self._persist(job.id, f, offset)
                         durable = offset
-                        fresh = await self._find_source(job)
+                        fresh = await self._find_source(job, fresh=True)
                         if fresh is None:
                             raise RuntimeError(MSG_NO_SOURCE)
                         source = fresh
+                complete = True
             finally:
-                # Record whatever is durable now, whatever happens next.
                 if offset != durable:
-                    await asyncio.shield(self._persist(job.id, f, offset))
+                    if complete:
+                        # `_finalize` records the file next; its data only has
+                        # to be on disk before it moves into the library.
+                        f.flush()
+                        await asyncio.to_thread(os.fsync, f.fileno())
+                    else:
+                        # Record whatever is durable now, whatever happens next.
+                        await asyncio.shield(self._persist(job.id, f, offset))
+        return hasher.hexdigest() if hasher is not None else None
 
     async def _persist(self, doc_id: int, f, offset: int) -> None:
         f.flush()
         await asyncio.to_thread(os.fsync, f.fileno())
-        async with self._db.write() as s:
+        async with self._db.write(minor=True) as s:
             await s.execute(update(Document).where(Document.id == doc_id).values(bytes_downloaded=offset))
 
-    async def _finalize(self, job: Job, part: Path) -> None:
+    async def _finalize(self, job: Job, part: Path, sha: str | None = None) -> None:
         size = part.stat().st_size
         if size != job.size:
             part.unlink(missing_ok=True)
             async with self._db.write() as s:
                 await s.execute(update(Document).where(Document.id == job.id).values(bytes_downloaded=0))
             raise RuntimeError(f"حجم الملف غير مطابق ({size} بدلاً من {job.size})")
-        sha = await asyncio.to_thread(sha256_file, part)
+        if sha is None:  # resumed: part of it was written by an earlier run
+            sha = await asyncio.to_thread(sha256_file, part)
 
         async with self._finalize_lock:
             delete_part = False

@@ -1,20 +1,32 @@
 @import "tailwindcss";
 
+/* A light theme in the spirit of Telegram: blue accent, white surfaces on a
+   cool grey canvas, rounded shapes, and chat bubbles on a soft wallpaper. */
 @theme {
-  --font-sans: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif;
-  --font-display: "Reem Kufi", "IBM Plex Sans Arabic", sans-serif;
+  --font-sans: "IBM Plex Sans Arabic", "Segoe UI", Roboto, "Helvetica Neue", Tahoma, sans-serif;
 
-  --color-paper: #f4f6f3;
-  --color-ink: #17302c;
-  --color-ink-soft: #4d5f5b;
-  --color-binding: #1f5f55;
-  --color-binding-dark: #154640;
-  --color-binding-tint: #e3eeeb;
-  --color-gilt: #a97a1e;
-  --color-gilt-tint: #f5ecd9;
-  --color-line: #d5dcd6;
-  --color-danger: #b42318;
-  --color-danger-tint: #fbeae8;
+  --color-canvas: #eef1f5;
+  --color-ink: #17212b;
+  --color-ink-soft: #5f6b76;
+  --color-accent: #2078c5;
+  --color-accent-strong: #17609f;
+  --color-accent-tint: #e3f0fb;
+  --color-warn: #a36200;
+  --color-warn-tint: #fdf1dc;
+  --color-line: #dfe3e8;
+  --color-danger: #d32f2f;
+  --color-danger-tint: #fdecea;
+
+  /* Chat reader */
+  --color-bubble-out: #e7fdd8;
+  --color-bubble-out-meta: #2e7d32;
+  --color-pill: rgb(40 60 48 / 0.62);
+
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.875rem;
+  --radius-2xl: 1.125rem;
+
+  --shadow-bubble: 0 1px 2px rgb(16 35 47 / 0.16);
 }
 
 @layer base {
@@ -23,24 +35,41 @@
   }
 
   body {
-    background: var(--color-paper);
+    background: var(--color-canvas);
     color: var(--color-ink);
     -webkit-font-smoothing: antialiased;
   }
 
   :focus-visible {
-    outline: 3px solid var(--color-gilt);
+    outline: 3px solid var(--color-accent);
     outline-offset: 2px;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--color-accent) 28%, transparent);
   }
 }
 
-/* Page title: Kufi with a binding band on the reading-start side. */
 .page-title {
-  font-family: var(--font-display);
-  font-size: 2.1rem;
-  line-height: 1.25;
-  border-inline-start: 6px solid var(--color-binding);
-  padding-inline-start: 0.75rem;
+  font-size: 1.65rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* Wallpaper behind the messages of a chat. */
+.chat-wallpaper {
+  background-color: #c9d9b7;
+  background-image:
+    radial-gradient(at 12% 18%, #dfe6b9 0, transparent 55%),
+    radial-gradient(at 88% 12%, #a3d0a8 0, transparent 50%),
+    radial-gradient(at 82% 88%, #d6dfa6 0, transparent 55%),
+    radial-gradient(at 15% 85%, #93c6a2 0, transparent 50%);
+}
+
+/* Scrollbars that stay out of the way, as in a chat app. */
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(23 33 43 / 0.28) transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {

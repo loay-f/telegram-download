@@ -7,8 +7,11 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Formats PyMuPDF can open.
-RENDERABLE = {".pdf", ".epub", ".mobi", ".fb2", ".xps", ".cbz"}
+# Formats PyMuPDF can open: books, and pictures (their own thumbnail).
+RENDERABLE = {
+    ".pdf", ".epub", ".mobi", ".fb2", ".xps", ".cbz",
+    ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff",
+}
 WIDTH = 240
 
 

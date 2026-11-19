@@ -38,8 +38,8 @@ export function Dashboard() {
       {/* The one thing the user comes here to learn: is it working? */}
       <section aria-live="polite" className="pt-2">
         <h1
-          className={`font-display text-4xl sm:text-5xl leading-tight ${
-            attention ? "text-gilt" : "text-binding-dark"
+          className={`text-3xl sm:text-4xl font-semibold leading-tight ${
+            attention ? "text-warn" : "text-accent-strong"
           }`}
         >
           {sentence.title}
@@ -57,13 +57,13 @@ export function Dashboard() {
       </section>
 
       <section aria-label="أرقام المكتبة" className="grid grid-cols-2 lg:grid-cols-4 gap-px overflow-hidden rounded-xl border border-line bg-line">
-        <Figure label="كتاب في المكتبة" value={num(stats.files)} />
+        <Figure label="ملف في المكتبة" value={num(stats.files)} />
         <Figure label="الحجم الكلي" value={bytes(stats.library_bytes)} />
         <Figure
           label="نسخة مكررة لم تُحفظ مرتين"
           value={num(stats.duplicates)}
           note={stats.space_saved_bytes > 0 ? `وفّرت ${bytes(stats.space_saved_bytes)}` : undefined}
-          gilt
+          warn
         />
         <Figure
           label="في الانتظار"
@@ -74,7 +74,7 @@ export function Dashboard() {
 
       {stats.status_counts.available > 0 && (
         <p className="-mt-6">
-          <Link to="/library?view=available" className="text-binding underline underline-offset-4">
+          <Link to="/library?view=available" className="text-accent underline underline-offset-4">
             {count(stats.status_counts.available, NOUNS.file)} متاحة للتنزيل في المكتبة
           </Link>{" "}
           <span className="text-ink-soft">— وجدها البرنامج في المحادثات المتابَعة، وتنتظر اختيارك.</span>
@@ -94,7 +94,7 @@ export function Dashboard() {
           <p className="text-ink-soft">
             لا يوجد تنزيل الآن.{" "}
             {stats.status_counts.failed > 0 && (
-              <Link to="/queue?tab=failed" className="text-binding underline underline-offset-4">
+              <Link to="/queue?tab=failed" className="text-accent underline underline-offset-4">
                 {count(stats.status_counts.failed, NOUNS.file)} لم ينجح تنزيلها
               </Link>
             )}
@@ -125,7 +125,7 @@ export function Dashboard() {
 
       {scan.current && (
         <section className="rounded-xl border border-line bg-white px-5 py-4 flex items-center gap-4">
-          <Spinner className="size-5 text-binding" />
+          <Spinner className="size-5 text-accent" />
           <p>
             يفحص الآن «<bdi>{scan.current.title}</bdi>»: {count(scan.current.messages, NOUNS.message)}،
             وجد {count(scan.current.new_documents, NOUNS.file)} جديدة.
@@ -142,12 +142,12 @@ export function Dashboard() {
   );
 }
 
-function Figure({ label, value, note, gilt }: { label: string; value: string; note?: string; gilt?: boolean }) {
+function Figure({ label, value, note, warn }: { label: string; value: string; note?: string; warn?: boolean }) {
   return (
     <div className="bg-white px-5 py-5">
-      <div className={`text-3xl font-semibold ${gilt ? "text-gilt" : "text-ink"}`}>{value}</div>
+      <div className={`text-3xl font-semibold ${warn ? "text-warn" : "text-ink"}`}>{value}</div>
       <div className="mt-1 text-ink-soft">{label}</div>
-      {note && <div className={`mt-1 text-sm ${gilt ? "text-gilt" : "text-ink-soft"}`}>{note}</div>}
+      {note && <div className={`mt-1 text-sm ${warn ? "text-warn" : "text-ink-soft"}`}>{note}</div>}
     </div>
   );
 }

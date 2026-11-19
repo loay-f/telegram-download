@@ -1,17 +1,18 @@
 """Wires together the long-lived services that share the process's event loop."""
 
-import asyncio
 from collections.abc import Callable
 
 from tglib.app.config import Settings
 from tglib.app.security import AppAuth, load_secret
 from tglib.db.session import Database
 from tglib.engine.account import TelegramAccount
+from tglib.engine.dialogs import DialogSync
 from tglib.engine.downloader import DownloadEngine
 from tglib.engine.events import EventBus
+from tglib.engine.history import ChatHistory
 from tglib.engine.scanner import Scanner
 from tglib.engine.settings_store import SettingsStore
-from tglib.engine.stats import StatsCache
+from tglib.engine.stats import ChatCounts, StatsCache
 from tglib.engine.summary import DailySummary
 from tglib.engine.thumbs import Thumbnails
 from tglib.engine.telegram import TelegramGateway, TelethonGateway
@@ -40,13 +41,14 @@ class Container:
             self.db, self.account, self.app_settings, self.events, on_new_documents=self.engine.wake
         )
         self.stats = StatsCache(self.db)
+        self.chat_counts = ChatCounts(self.db)
         self.summary = DailySummary(self.db, self.account, self.app_settings)
         self.thumbs = Thumbnails(settings.data_dir)
         # Recent search results, so a picked result can be recorded without
         # searching Telegram again: (chat_id, msg_id) -> (DocMessage, DialogInfo)
         self.search_cache: dict = {}
-        self.dialogs_synced_at = 0.0
-        self.dialogs_lock = asyncio.Lock()  # one dialog sync at a time
+        self.dialogs = DialogSync(self.db, self.account, self.events)
+        self.history = ChatHistory(self.account)
 
     async def start(self) -> None:
         await self.app_settings.load()
@@ -57,6 +59,8 @@ class Container:
 
     async def stop(self) -> None:
         await self.summary.stop()
+        await self.dialogs.stop()
+        await self.history.stop()
         await self.engine.stop()
         await self.scanner.stop()
         await self.account.stop()

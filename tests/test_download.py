@@ -335,3 +335,19 @@ async def test_paused_state_survives_restart(settings):
     async with running_container(settings, gw) as ctx:
         await ctx.engine.start()
         assert ctx.engine.paused is True
+
+
+async def test_a_photo_downloads_under_a_name_made_for_it(settings):
+    gw = FakeGateway()
+    gw.add_chat(-1001, "قناة الصور")
+    picture = bytes(range(256)) * 40
+    gw.post(-1001, 5, FakeFile(77, "p.jpg", picture, mime="image/jpeg", kind="media"))
+    async with running_container(settings, gw, loops=True) as ctx:
+        await track(ctx, -1001)
+        await scan_all(ctx, -1001)
+        await wait_for(all_settled(ctx))
+        (doc,) = await all_docs(ctx)
+        assert doc.status == DocStatus.DONE and doc.mime == "image/jpeg"
+        (blob,) = await blobs(ctx)
+        assert blob.storage_path == "library/chat/photo_2024-01-01_5.jpg"  # `track` names the chat "chat"
+        assert (settings.storage_dir / blob.storage_path).read_bytes() == picture

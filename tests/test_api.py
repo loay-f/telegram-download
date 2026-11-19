@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from tglib.api.status import sse
 from tglib.app.main import create_app
 from fake_telegram import FakeFile, FakeGateway
+from helpers import sync_chats
 from test_auth import login, wait_for_state
 from test_chats_api import wait_until
 
@@ -32,7 +33,7 @@ def client(settings):
         login(c)
         wait_for_state(c, "ready")
         c.post("/api/settings", json={"allowed_exts": "pdf,epub,html"})
-        c.get("/api/chats")  # syncs dialogs into the DB
+        sync_chats(c)
         for chat in (-1001, -1002):
             c.post(f"/api/chats/{chat}/settings", json={"auto_download": True})
             c.post(f"/api/chats/{chat}/track", json={"tracked": True})
@@ -88,6 +89,18 @@ def test_html_file_is_never_served_inline(client):
     assert r.headers["content-type"].startswith("application/octet-stream")
     assert "sandbox" in r.headers["content-security-policy"]
     assert r.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_picture_opens_inside_the_app(client):
+    doc_id = client.get("/api/documents", params={"status": "skipped"}).json()["items"][0]["id"]  # photo.jpg
+    client.post(f"/api/documents/{doc_id}/retry")
+    wait_until(lambda: client.get(f"/api/documents/{doc_id}").json()["has_file"])
+    r = client.get(f"/api/files/{doc_id}")
+    assert r.headers["content-type"] == "image/jpeg" and r.headers["content-disposition"].startswith("inline")
+    assert "sandbox" in r.headers["content-security-policy"] and r.headers["x-content-type-options"] == "nosniff"
+    # Seeking in a video asks for a part of the file.
+    part = client.get(f"/api/files/{doc_id}", headers={"Range": "bytes=0-1"})
+    assert part.status_code == 206 and part.content == b"jp"
 
 
 def test_stats(client):

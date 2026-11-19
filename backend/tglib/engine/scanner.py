@@ -13,15 +13,25 @@ from sqlalchemy import select, update
 from tglib.db.models import Chat, utcnow
 from tglib.db.session import Database
 from tglib.engine.account import TelegramAccount
-from tglib.engine.catalog import Filters, record_message
+from tglib.engine.catalog import Filters, record_messages
 from tglib.engine.errors import ChatUnavailable, FloodWait, NotAuthorized, NotConnected
 from tglib.engine.events import EventBus
-from tglib.engine.settings_store import SettingsStore
+from tglib.engine.settings_store import SettingsStore, scan_kinds
 from tglib.engine.telegram import DocMessage
 
 log = logging.getLogger(__name__)
 
 BATCH = 100
+
+# Telegram lists a chat's files, its photos and videos, and its audio
+# separately, so each is a pass of its own with its own position in the chat:
+# kind -> the Chat columns holding (floor, top of an unfinished pass, where it
+# continues below).
+POSITIONS = {
+    "file": ("last_scanned_msg_id", "scan_top_msg_id", "scan_resume_msg_id"),
+    "media": ("media_scanned_msg_id", "media_top_msg_id", "media_resume_msg_id"),
+    "audio": ("audio_scanned_msg_id", "audio_top_msg_id", "audio_resume_msg_id"),
+}
 
 
 @dataclass
@@ -143,36 +153,31 @@ class Scanner:
         if chat is None or not chat.tracked:
             return
 
-        gw = self._account.gateway
         progress = self.current = ScanProgress(chat_id=chat_id, title=chat.title or "")
         self._publish()
-        min_id = chat.last_scanned_msg_id
-        max_seen = min_id
-        offset_id = 0  # newest-first: resume below the lowest id handled so far
-        batch: list[DocMessage] = []
         error: str | None = None
-        log.info("Scanning %s (%s) from message %s", chat.title, chat_id, min_id)
 
         try:
-            while True:
-                try:
-                    async for dm in gw.iter_document_messages(chat_id, min_id, offset_id):
-                        batch.append(dm)
-                        max_seen = max(max_seen, dm.msg_id)
-                        offset_id = dm.msg_id
-                        progress.messages += 1
-                        if len(batch) >= BATCH:
-                            await self._flush(chat_id, batch, progress)
-                    break
-                except FloodWait as e:
-                    await self._flush(chat_id, batch, progress)
-                    log.warning("Flood wait %ss while scanning %s", e.seconds, chat_id)
-                    progress.flood_wait_until = time.time() + e.seconds
-                    self._publish()
-                    await asyncio.sleep(e.seconds)
-                    progress.flood_wait_until = None
-                    self._publish()
-            await self._flush(chat_id, batch, progress)
+            # Only the kinds that can hold a file type this chat accepts.
+            for kind in scan_kinds(Filters.for_chat(chat, self._settings.current).exts):
+                floor_col, top_col, resume_col = POSITIONS[kind]
+                floor = getattr(chat, floor_col)
+                # A pass that was cut short earlier continues below where it stopped.
+                top, offset_id = getattr(chat, top_col) or 0, getattr(chat, resume_col) or 0
+                # A kind that starts being scanned in a chat scanned before
+                # (its type was just allowed) lists what is already there;
+                # only files posted from now on download automatically.
+                list_only = kind != "file" and floor == 0 and chat.last_scan_at is not None
+                while True:
+                    resumed = offset_id > 0
+                    if resumed:
+                        log.info("Resuming scan of %s (%s, %s) below message %s", chat.title, chat_id, kind, offset_id)
+                    else:
+                        log.info("Scanning %s (%s, %s) from message %s", chat.title, chat_id, kind, floor)
+                    floor = await self._pass(chat_id, kind, floor, top, offset_id, progress, list_only)
+                    if not resumed:
+                        break
+                    top = offset_id = 0  # then whatever was posted since that pass began
         except ChatUnavailable as e:
             error = "لا يمكن الوصول إلى هذه المحادثة (ربما غادرتها أو أصبحت خاصة)."
             log.warning("Chat %s unavailable: %s", chat_id, e)
@@ -186,33 +191,75 @@ class Scanner:
             return
 
         async with self._db.write() as s:
-            values = {"last_scan_at": utcnow(), "last_scan_error": error}
-            if error is None:
-                # Only after a complete pass: an interrupted scan reruns from
-                # the old position and inserts are idempotent.
-                values["last_scanned_msg_id"] = max_seen
-            await s.execute(update(Chat).where(Chat.id == chat_id).values(**values))
+            await s.execute(
+                update(Chat).where(Chat.id == chat_id).values(last_scan_at=utcnow(), last_scan_error=error)
+            )
         log.info(
             "Scan of %s done: %s messages, %s new documents",
             chat_id, progress.messages, progress.new_documents,
         )
         self._events.publish("scan_done", {"chat_id": chat_id, **progress.public()})
 
+    async def _pass(
+        self, chat_id: int, kind: str, floor: int, top: int, offset_id: int, progress: ScanProgress,
+        list_only: bool = False,
+    ) -> int:
+        """Records the chat's files of one `kind` newer than message `floor`,
+        newest first, starting below `offset_id` when a pass that already
+        reached `top` is being continued. The position is saved with every
+        batch, so a pass that is cut short continues from there. Returns the
+        new floor."""
+        gw = self._account.gateway
+        batch: list[DocMessage] = []
+        while True:
+            try:
+                async for dm in gw.iter_document_messages(chat_id, floor, offset_id, kind):
+                    batch.append(dm)
+                    top = max(top, dm.msg_id)
+                    offset_id = dm.msg_id
+                    progress.messages += 1
+                    if len(batch) >= BATCH:
+                        await self._flush(chat_id, kind, batch, progress, top, offset_id, list_only)
+                break
+            except FloodWait as e:
+                await self._flush(chat_id, kind, batch, progress, top, offset_id, list_only)
+                log.warning("Flood wait %ss while scanning %s", e.seconds, chat_id)
+                progress.flood_wait_until = time.time() + e.seconds
+                self._publish()
+                await asyncio.sleep(e.seconds)
+                progress.flood_wait_until = None
+                self._publish()
+        await self._flush(chat_id, kind, batch, progress, top, offset_id, list_only)
+
+        floor = max(floor, top)
+        floor_col, top_col, resume_col = POSITIONS[kind]
+        async with self._db.write() as s:
+            await s.execute(
+                update(Chat).where(Chat.id == chat_id).values({floor_col: floor, top_col: None, resume_col: None})
+            )
+        return floor
+
     def _requeue_later(self, chat_id: int, delay: float = 60) -> None:
         loop = asyncio.get_running_loop()
         loop.call_later(delay, self.enqueue, chat_id)
 
-    async def _flush(self, chat_id: int, batch: list[DocMessage], progress: ScanProgress) -> None:
+    async def _flush(
+        self, chat_id: int, kind: str, batch: list[DocMessage], progress: ScanProgress, top: int, offset_id: int,
+        list_only: bool = False,
+    ) -> None:
+        """Records a batch together with how far the pass has got."""
         if not batch:
             return
-        new = 0
+        _, top_col, resume_col = POSITIONS[kind]
         async with self._db.write() as s:
             chat = await s.get(Chat, chat_id)
             filters = Filters.for_chat(chat, self._settings.current)
-            for dm in batch:
-                outcome = await record_message(s, chat, dm, filters)
-                if outcome not in ("known", "appearance"):
-                    new += 1
+            if list_only:
+                filters.auto_download = False
+            outcomes = await record_messages(s, chat, batch, filters)
+            new = sum(outcome not in ("known", "appearance") for outcome in outcomes)
+            setattr(chat, top_col, top)
+            setattr(chat, resume_col, offset_id)
         batch.clear()
         progress.new_documents += new
         self._publish()

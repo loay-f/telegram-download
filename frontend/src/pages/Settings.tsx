@@ -3,12 +3,14 @@ import { ApiError, api, post } from "../lib/api";
 import type { AccountStatus } from "../lib/account";
 import { NOUNS, bytes, count, digits } from "../lib/format";
 import { useAccount } from "../lib/context";
+import { FormatPicker, SizeLimit } from "../components/FormatPicker";
 import { Alert, Button, Panel, ProgressBar, Spinner } from "../components/ui";
 
 interface SettingsData {
   allowed_exts: string;
   max_size_mb: number;
   workers: number;
+  download_streams: number;
   scan_interval_hours: number;
   max_attempts: number;
   speed_limit_kbps: number;
@@ -20,32 +22,17 @@ interface SettingsData {
   summary_hour: number;
   library_bytes: number;
   storage: { total: number; free: number; partial_bytes: number; path: string };
+  /** After saving: files that came back / left the list with the new types. */
   reopened?: number;
+  hidden?: number;
 }
-
-const COMMON_TYPES: { ext: string; label: string }[] = [
-  { ext: "pdf", label: "PDF" },
-  { ext: "epub", label: "EPUB" },
-  { ext: "djvu", label: "DjVu" },
-  { ext: "mobi", label: "MOBI" },
-  { ext: "azw3", label: "AZW3 (كندل)" },
-  { ext: "doc", label: "Word قديم (DOC)" },
-  { ext: "docx", label: "Word (DOCX)" },
-  { ext: "txt", label: "نص (TXT)" },
-  { ext: "md", label: "Markdown" },
-  { ext: "rtf", label: "RTF" },
-  { ext: "odt", label: "ODT" },
-  { ext: "zip", label: "ZIP مضغوط" },
-  { ext: "rar", label: "RAR مضغوط" },
-  { ext: "7z", label: "7z مضغوط" },
-];
 
 export function SettingsPage() {
   const [data, setData] = useState<SettingsData | null>(null);
-  const [exts, setExts] = useState<Set<string>>(new Set());
-  const [extra, setExtra] = useState("");
-  const [maxMb, setMaxMb] = useState("0");
+  const [allowed, setAllowed] = useState<string[]>([]);
+  const [maxMb, setMaxMb] = useState(0);
   const [workers, setWorkers] = useState(3);
+  const [streams, setStreams] = useState(1);
   const [interval, setIntervalH] = useState(6);
   const [attempts, setAttempts] = useState(5);
   const [limitOn, setLimitOn] = useState(false);
@@ -60,12 +47,10 @@ export function SettingsPage() {
 
   function apply(d: SettingsData) {
     setData(d);
-    const all = d.allowed_exts.split(",").filter(Boolean);
-    const common = new Set(COMMON_TYPES.map((t) => t.ext));
-    setExts(new Set(all.filter((e) => common.has(e))));
-    setExtra(all.filter((e) => !common.has(e)).join(", "));
-    setMaxMb(String(d.max_size_mb));
+    setAllowed(d.allowed_exts.split(",").filter(Boolean));
+    setMaxMb(d.max_size_mb);
     setWorkers(d.workers);
+    setStreams(d.download_streams);
     setIntervalH(d.scan_interval_hours);
     setAttempts(d.max_attempts);
     setLimitOn(d.speed_limit_kbps > 0);
@@ -85,11 +70,11 @@ export function SettingsPage() {
     setSaving(true);
     setMessage(null);
     try {
-      const allowed = [...exts, ...extra.split(/[,،\s]+/).map((e) => e.trim().replace(/^\./, "")).filter(Boolean)];
       const d = await post<SettingsData>("/api/settings", {
         allowed_exts: allowed.join(","),
-        max_size_mb: Math.max(0, Number(maxMb) || 0),
+        max_size_mb: maxMb,
         workers,
+        download_streams: streams,
         scan_interval_hours: interval,
         max_attempts: attempts,
         speed_limit_kbps: limitOn ? Math.max(1, Math.round(Number(limitMb) * 1024) || 0) : 0,
@@ -102,12 +87,11 @@ export function SettingsPage() {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
       });
       apply(d);
-      setMessage({
-        kind: "info",
-        text: d.reopened
-          ? `حُفظت الإعدادات. أُضيفت إلى قائمة التنزيل ${count(d.reopened, NOUNS.file)} كانت متخطاة.`
-          : "حُفظت الإعدادات.",
-      });
+      const notes = [
+        d.reopened ? `عاد إلى القائمة ${count(d.reopened, NOUNS.file)} كانت متخطاة.` : "",
+        d.hidden ? `أُخفي من القائمة ${count(d.hidden, NOUNS.file)} من الأنواع المستثناة (لم يُحذف شيء مما نُزّل).` : "",
+      ];
+      setMessage({ kind: "info", text: ["حُفظت الإعدادات.", ...notes].filter(Boolean).join(" ") });
     } catch (e) {
       setMessage({ kind: "danger", text: e instanceof ApiError ? e.message : "تعذّر الحفظ." });
     } finally {
@@ -119,7 +103,7 @@ export function SettingsPage() {
     return (
       <div className="space-y-6">
         <h1 className="page-title">الإعدادات</h1>
-        {message ? <Alert>{message.text}</Alert> : <Spinner className="size-6 text-binding" />}
+        {message ? <Alert>{message.text}</Alert> : <Spinner className="size-6 text-accent" />}
       </div>
     );
   }
@@ -130,47 +114,21 @@ export function SettingsPage() {
     <div className="space-y-6 max-w-3xl">
       <h1 className="page-title">الإعدادات</h1>
 
-      <Panel title="أنواع الملفات التي تُنزَّل">
-        <div className="grid gap-2 sm:grid-cols-2">
-          {COMMON_TYPES.map((t) => (
-            <label key={t.ext} className="flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-paper cursor-pointer">
-              <input
-                type="checkbox"
-                checked={exts.has(t.ext)}
-                onChange={(e) => {
-                  const next = new Set(exts);
-                  if (e.target.checked) next.add(t.ext);
-                  else next.delete(t.ext);
-                  setExts(next);
-                }}
-                className="size-5 accent-binding"
-              />
-              {t.label}
-            </label>
-          ))}
+      <Panel title="أنواع الملفات">
+        <p className="mb-4 text-ink-soft">
+          شغّل الأنواع التي تريد أن يجدها البرنامج في المحادثات التي تتابعها. ما تطفئه يُتجاهل، ويمكنك داخل كل
+          نوع استثناء صيغ بعينها.
+        </p>
+        <FormatPicker value={allowed} onChange={setAllowed} />
+        <div className="mt-5">
+          <label htmlFor="max-size" className="block font-semibold">
+            أكبر حجم للملف الواحد
+          </label>
+          <p className="mb-2 text-sm text-ink-soft">
+            الملفات الأكبر من ذلك تُتجاهل. مفيد مع الفيديو حتى لا يمتلئ القرص.
+          </p>
+          <SizeLimit id="max-size" value={maxMb} onChange={(mb) => setMaxMb(mb ?? 0)} />
         </div>
-        <label className="block mt-4">
-          <span className="block font-semibold mb-1">أنواع أخرى</span>
-          <input
-            dir="ltr"
-            value={extra}
-            onChange={(e) => setExtra(e.target.value)}
-            placeholder="cbz, chm"
-            className="w-full rounded-lg border border-line bg-white px-3 min-h-11 text-start"
-          />
-          <span className="block text-sm text-ink-soft mt-1">افصل بينها بفواصل.</span>
-        </label>
-        <label className="block mt-4">
-          <span className="block font-semibold mb-1">أقصى حجم للملف (ميغابايت)</span>
-          <input
-            type="number"
-            min={0}
-            value={maxMb}
-            onChange={(e) => setMaxMb(e.target.value)}
-            className="w-40 rounded-lg border border-line bg-white px-3 min-h-11"
-          />
-          <span className="block text-sm text-ink-soft mt-1">صفر يعني بلا حد.</span>
-        </label>
       </Panel>
 
       <Panel title="أوقات التنزيل وسرعته">
@@ -253,6 +211,14 @@ export function SettingsPage() {
             onChange={setWorkers}
           />
           <NumberField
+            label="أجزاء الملف الواحد التي تُطلب معاً (تجريبي)"
+            hint="١ هو المعتاد: جزء بعد جزء. رقم أكبر قد يسرّع الملفات الكبيرة، وقد يجعل تيليغرام يطلب الانتظار فتتوقف كل التنزيلات مؤقتاً، خاصة في الحسابات غير المميزة. جرّب ٢ أو ٤ وراقب السرعة، وأعده إلى ١ إن ظهر الانتظار."
+            value={streams}
+            min={1}
+            max={8}
+            onChange={setStreams}
+          />
+          <NumberField
             label="إعادة فحص المحادثات كل (ساعة)"
             value={interval}
             min={1}
@@ -282,14 +248,14 @@ export function SettingsPage() {
           مستخدم {bytes(used)} من {bytes(data.storage.total)} — المتبقي <strong>{bytes(data.storage.free)}</strong>
         </p>
         <p className="mt-1 text-ink-soft">
-          الكتب المحفوظة: {bytes(data.library_bytes)}
+          الملفات المحفوظة: {bytes(data.library_bytes)}
           {data.storage.partial_bytes > 0 && <> · تنزيلات غير مكتملة: {bytes(data.storage.partial_bytes)}</>}
         </p>
         <p className="mt-1 text-ink-soft">
-          الكتب محفوظة في مجلد لكل محادثة داخل المجلد <bdi dir="ltr">library</bdi> في مجلد التخزين.
+          الملفات محفوظة في مجلد لكل محادثة داخل المجلد <bdi dir="ltr">library</bdi> في مجلد التخزين.
         </p>
         <details className="mt-4">
-          <summary className="cursor-pointer text-binding font-semibold">نقل المكتبة إلى قرص آخر</summary>
+          <summary className="cursor-pointer text-accent font-semibold">نقل المكتبة إلى قرص آخر</summary>
           <div className="mt-3 space-y-2 text-ink-soft">
             <p>
               مكان التخزين يُحدَّد عند تشغيل البرنامج ولا يمكن تغييره من هنا، لأن البرنامج يعمل داخل Docker ولا يرى
@@ -307,7 +273,7 @@ export function SettingsPage() {
               <li>
                 شغّل البرنامج: <bdi dir="ltr" className="font-mono text-ink">docker compose up -d</bdi>
               </li>
-              <li>بعد التأكد أن الكتب تظهر وتُفتح، احذف المجلد القديم.</li>
+              <li>بعد التأكد أن الملفات تظهر وتُفتح، احذف المجلد القديم.</li>
             </ol>
           </div>
         </details>
@@ -330,7 +296,7 @@ function CheckRow({ checked, onChange, label, hint }: {
         type="checkbox"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
-        className="mt-1 size-5 accent-binding"
+        className="mt-1 size-5 accent-accent"
       />
       <span>
         <span className="block font-semibold">{label}</span>
@@ -424,7 +390,7 @@ function AccountPanel() {
       {confirming && (
         <div className="mt-4 space-y-3">
           <Alert>
-            سيتوقف التنزيل ويُحذف ملف الجلسة. الكتب التي نُزّلت تبقى محفوظة. ستحتاج إلى رمز جديد من تيليغرام
+            سيتوقف التنزيل ويُحذف ملف الجلسة. الملفات التي نُزّلت تبقى محفوظة. ستحتاج إلى رمز جديد من تيليغرام
             للدخول مرة أخرى.
           </Alert>
           <div className="flex gap-3">
