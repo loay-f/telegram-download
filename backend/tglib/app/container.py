@@ -12,7 +12,7 @@ from tglib.engine.events import EventBus
 from tglib.engine.history import ChatHistory
 from tglib.engine.scanner import Scanner
 from tglib.engine.settings_store import SettingsStore
-from tglib.engine.stats import StatsCache
+from tglib.engine.stats import ChatCounts, StatsCache
 from tglib.engine.summary import DailySummary
 from tglib.engine.thumbs import Thumbnails
 from tglib.engine.telegram import TelegramGateway, TelethonGateway
@@ -41,6 +41,7 @@ class Container:
             self.db, self.account, self.app_settings, self.events, on_new_documents=self.engine.wake
         )
         self.stats = StatsCache(self.db)
+        self.chat_counts = ChatCounts(self.db)
         self.summary = DailySummary(self.db, self.account, self.app_settings)
         self.thumbs = Thumbnails(settings.data_dir)
         # Recent search results, so a picked result can be recorded without

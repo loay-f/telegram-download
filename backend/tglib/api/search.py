@@ -8,9 +8,10 @@ from sqlalchemy import select
 
 from tglib.api.deps import api_error, get_ctx, require_auth
 from tglib.app.container import Container
-from tglib.db.models import Document
-from tglib.engine.catalog import record_explicit
-from tglib.engine.errors import ChatUnavailable, FloodWait, TelegramError
+from tglib.db.models import Chat, Document
+from tglib.engine.catalog import ensure_chat, record_explicit
+from tglib.engine.errors import ChatUnavailable, FloodWait, NotConnected, TelegramError
+from tglib.engine.history import PAGE_MAX
 from tglib.engine.links import parse_message_link
 from tglib.engine.telegram import DialogInfo, DocMessage
 
@@ -29,7 +30,24 @@ def _require_ready(ctx: Container) -> None:
 def _telegram_error(e: TelegramError):
     if isinstance(e, FloodWait):
         return api_error(429, "flood", f"طلب تيليغرام الانتظار {e.seconds} ثانية. حاول بعد قليل.")
+    if isinstance(e, NotConnected):
+        return api_error(503, "offline", "تعذّر الاتصال بتيليغرام الآن. حاول بعد قليل.")
     return api_error(502, "telegram", f"خطأ من تيليغرام: {e}")
+
+
+async def _ensure_chats(ctx: Container, chats: list[DialogInfo]) -> None:
+    """Search finds messages in chats the local list may not have yet; a row
+    for each lets its result be opened and read."""
+    wanted = {c.id: c for c in chats}
+    if not wanted:
+        return
+    async with ctx.db.read() as s:
+        have = set((await s.execute(select(Chat.id).where(Chat.id.in_(wanted)))).scalars())
+    missing = [c for i, c in wanted.items() if i not in have]
+    if missing:
+        async with ctx.db.write() as s:
+            for c in missing:
+                await ensure_chat(s, c, is_member=True)
 
 
 def _remember(ctx: Container, dm: DocMessage, chat: DialogInfo) -> None:
@@ -75,7 +93,47 @@ async def search(q: str = Query(..., min_length=2, max_length=200), ctx: Contain
     known = await _known(ctx, [dm.document.tg_document_id for dm, _ in hits])
     for dm, chat in hits:
         _remember(ctx, dm, chat)
+    await _ensure_chats(ctx, [chat for _, chat in hits])
     return {"items": [_hit(dm, chat, known.get(dm.document.tg_document_id)) for dm, chat in hits]}
+
+
+@router.get("/search/messages")
+async def search_messages(
+    q: str = Query(..., min_length=2, max_length=200),
+    limit: int = Query(30, ge=1, le=PAGE_MAX),
+    ctx: Container = Depends(get_ctx),
+):
+    """Messages that match, across all of the account's chats, newest first.
+    Each can be opened in its chat (`/api/chats/{id}/messages?around=`).
+    Messages that are a file are left to the search for files (`/api/search`).
+    `has_more` says Telegram's page was full: a larger `limit` may find more."""
+    _require_ready(ctx)
+    query = " ".join(q.split())
+    if len(query) < 2:
+        return {"items": [], "has_more": False}
+    try:
+        found = await ctx.history.search_all(query, limit=limit)
+    except TelegramError as e:
+        raise _telegram_error(e)
+    full = len(found) == limit
+    found = [m for m in found if not (m.media and m.media.kind == "file")]
+    await _ensure_chats(ctx, [m.chat for m in found])
+    return {
+        "items": [
+            {
+                "chat": {"id": m.chat.id, "title": m.chat.title, "type": m.chat.type},
+                "id": m.id,
+                "date": m.date,
+                "text": m.text,
+                "out": m.out,
+                "sender": m.sender,
+                "service": m.service,
+                "media": {"kind": m.media.kind, "name": m.media.name} if m.media else None,
+            }
+            for m in found
+        ],
+        "has_more": full,
+    }
 
 
 async def _record_and_queue(ctx: Container, dm: DocMessage, chat: DialogInfo, is_member: bool) -> dict:

@@ -23,6 +23,7 @@ T = TypeVar("T")
 PAGE_MAX = 100  # Telegram returns up to 100 messages per request
 LATEST_TTL = 5  # seconds a page of the newest messages is reused
 OLDER_TTL = 300  # ... and a page of older ones, which rarely change
+SEARCH_TTL = 60  # ... and a page of search results
 PAGES_MAX = 64  # cached pages
 MESSAGES_MAX = 4000  # messages with a picture kept for `preview`
 PREVIEWS_MAX_BYTES = 48 * 1024 * 1024
@@ -43,16 +44,42 @@ class ChatHistory:
         self._preview_slots = asyncio.Semaphore(PREVIEW_WORKERS)
 
     # --- public ---
-    async def page(self, chat_id: int, *, before: int = 0, after: int = 0, limit: int = 50) -> list[ChatMessage]:
+    async def page(
+        self, chat_id: int, *, before: int = 0, after: int = 0, limit: int = 50, forward: bool = False
+    ) -> list[ChatMessage]:
         """Up to `limit` messages, newest first, with id > `after` and (if
-        `before`) id < `before`."""
-        self._require_ready()
-        key = (chat_id, before, after, limit)
-        cached = self._pages.get(key)
-        if cached is not None and cached[0] > time.monotonic():
-            self._pages.move_to_end(key)
-            return cached[1]
-        return await self._shared(key, lambda: self._fetch_page(*key))
+        `before`) id < `before`: the newest of them, or with `forward` the
+        ones that come right after `after`."""
+        if forward:
+            return await self._cached(
+                ("after", chat_id, after, limit),
+                lambda: self._call(lambda g: g.get_history_after(chat_id, after, limit)),
+                # A full page lies inside the history; a short one ends at the newest message.
+                lambda page: OLDER_TTL if len(page) == limit else LATEST_TTL,
+            )
+        return await self._cached(
+            (chat_id, before, after, limit),
+            lambda: self._fetch_page(chat_id, before, after, limit),
+            lambda page: OLDER_TTL if before else LATEST_TTL,
+        )
+
+    async def search(self, chat_id: int, query: str, *, before: int = 0, limit: int = 30) -> list[ChatMessage]:
+        """Up to `limit` messages of the chat matching `query`, newest first,
+        with id < `before` if given."""
+        return await self._cached(
+            ("search", chat_id, query, before, limit),
+            lambda: self._call(lambda g: g.search_history(chat_id, query, offset_id=before, limit=limit)),
+            lambda page: SEARCH_TTL,
+        )
+
+    async def search_all(self, query: str, *, limit: int = 30) -> list[ChatMessage]:
+        """Up to `limit` messages matching `query` across all the account's
+        chats, newest first; each carries its `chat`."""
+        return await self._cached(
+            ("search-all", query, limit),
+            lambda: self._call(lambda g: g.search_messages(query, limit)),
+            lambda page: SEARCH_TTL,
+        )
 
     async def preview(self, chat_id: int, msg_id: int, full: bool = False) -> bytes | None:
         """Picture of a message (see `TelegramGateway.download_preview`), or
@@ -135,34 +162,48 @@ class ChatHistory:
             self._account.mark_disconnected()
             raise
 
-    async def _fetch_page(self, chat_id: int, before: int, after: int, limit: int) -> list[ChatMessage]:
+    async def _cached(
+        self,
+        key: tuple,
+        fetch: Callable[[], Awaitable[list[ChatMessage]]],
+        ttl: Callable[[list[ChatMessage]], float],
+    ) -> list[ChatMessage]:
+        """The page cached under `key`, or `fetch`ed and kept for `ttl(page)` seconds."""
+        self._require_ready()
+        cached = self._pages.get(key)
+        if cached is not None and cached[0] > time.monotonic():
+            self._pages.move_to_end(key)
+            return cached[1]
+        return await self._shared(key, lambda: self._fetch(key, fetch, ttl))
+
+    async def _fetch(self, key: tuple, fetch, ttl) -> list[ChatMessage]:
         login = self._login
-        page = None
+        page = await fetch()
+        if login != self._login:
+            return page  # logged out meanwhile: don't cache
+        self._pages[key] = (time.monotonic() + ttl(page), page)
+        self._pages.move_to_end(key)
+        while len(self._pages) > PAGES_MAX:
+            self._pages.popitem(last=False)
+        for m in page:
+            if m.media is not None and m.media.has_preview:
+                self._messages[(m.chat_id, m.id)] = m
+                self._messages.move_to_end((m.chat_id, m.id))
+        while len(self._messages) > MESSAGES_MAX:
+            self._messages.popitem(last=False)
+        return page
+
+    async def _fetch_page(self, chat_id: int, before: int, after: int, limit: int) -> list[ChatMessage]:
         if after and not before:
             # "Anything new?" is asked every few seconds and the answer is
             # mostly no. A page is downloaded whole before `after` is applied,
             # so look at the newest message alone first.
             newest = await self._call(lambda g: g.get_history(chat_id, limit=1))
             if not newest or newest[0].id <= after:
-                page = []
-            elif newest[0].id == after + 1:
-                page = newest  # the only new one
-        if page is None:
-            page = await self._call(lambda g: g.get_history(chat_id, offset_id=before, min_id=after, limit=limit))
-        if login != self._login:
-            return page  # logged out meanwhile: don't cache
-        ttl = OLDER_TTL if before else LATEST_TTL
-        self._pages[(chat_id, before, after, limit)] = (time.monotonic() + ttl, page)
-        self._pages.move_to_end((chat_id, before, after, limit))
-        while len(self._pages) > PAGES_MAX:
-            self._pages.popitem(last=False)
-        for m in page:
-            if m.media is not None and m.media.has_preview:
-                self._messages[(chat_id, m.id)] = m
-                self._messages.move_to_end((chat_id, m.id))
-        while len(self._messages) > MESSAGES_MAX:
-            self._messages.popitem(last=False)
-        return page
+                return []
+            if newest[0].id == after + 1:
+                return newest  # the only new one
+        return await self._call(lambda g: g.get_history(chat_id, offset_id=before, min_id=after, limit=limit))
 
     async def _fetch_preview(self, chat_id: int, msg_id: int, full: bool) -> bytes | None:
         login = self._login

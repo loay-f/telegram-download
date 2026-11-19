@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { api, onUnauthenticated } from "./lib/api";
 import type { AccountStatus } from "./lib/account";
 import { AccountContext } from "./lib/context";
-import { LiveContext, useLiveConnection } from "./lib/live";
+import { LiveProvider, useLive } from "./lib/live";
 import { AppLogin } from "./pages/AppLogin";
 import { TelegramSetup } from "./pages/TelegramSetup";
 import { Dashboard } from "./pages/Dashboard";
@@ -22,8 +22,6 @@ type AuthStatus = { authenticated: boolean; password_configured: boolean };
 export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [account, setAccount] = useState<AccountStatus | null>(null);
-  const ready = auth?.authenticated === true && account?.state === "ready";
-  const live = useLiveConnection(ready);
 
   const loadAuth = useCallback(async () => {
     try {
@@ -60,15 +58,14 @@ export default function App() {
     return () => clearInterval(t);
   }, [auth?.authenticated, account?.state, loadAccount]);
 
-  // The live stream notices when the session is revoked elsewhere.
-  const liveAccountState = live.status?.account.state;
-  useEffect(() => {
-    if (liveAccountState && liveAccountState !== "ready") loadAccount();
-  }, [liveAccountState, loadAccount]);
+  const accountCtx = useMemo(
+    () => (account ? { account, setAccount, reloadAccount: loadAccount } : null),
+    [account, loadAccount],
+  );
 
   if (!auth || (auth.authenticated && !account)) {
     return (
-      <div className="min-h-screen grid place-items-center text-binding">
+      <div className="min-h-screen grid place-items-center text-accent">
         <Spinner className="size-8" />
       </div>
     );
@@ -81,8 +78,9 @@ export default function App() {
   }
 
   return (
-    <AccountContext.Provider value={{ account: account!, setAccount, reloadAccount: loadAccount }}>
-      <LiveContext.Provider value={live}>
+    <AccountContext.Provider value={accountCtx}>
+      <LiveProvider>
+        <AccountWatch reload={loadAccount} />
         <BrowserRouter>
           <Routes>
             <Route path="read/:id" element={<ReaderPage />} />
@@ -98,7 +96,18 @@ export default function App() {
             </Route>
           </Routes>
         </BrowserRouter>
-      </LiveContext.Provider>
+      </LiveProvider>
     </AccountContext.Provider>
   );
+}
+
+/** The live stream notices when the session is revoked elsewhere. (Its own
+ * component: reading the live status here keeps the app's root, and with it
+ * every page, from rendering again with each snapshot.) */
+function AccountWatch({ reload }: { reload: () => Promise<void> }) {
+  const state = useLive().status?.account.state;
+  useEffect(() => {
+    if (state && state !== "ready") reload();
+  }, [state, reload]);
+  return null;
 }

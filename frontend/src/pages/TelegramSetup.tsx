@@ -52,7 +52,7 @@ export function TelegramSetup({ status, onChange }: { status: AccountStatus; onC
       ),
     },
     logged_out: {
-      subtitle: "اربط حسابك في تيليغرام ليتمكن البرنامج من تنزيل الكتب من القنوات التي أنت عضو فيها.",
+      subtitle: "اربط حسابك في تيليغرام ليتمكن البرنامج من تنزيل الكتب والملفات من القنوات التي أنت عضو فيها.",
       content: (
         <form
           className="space-y-5"

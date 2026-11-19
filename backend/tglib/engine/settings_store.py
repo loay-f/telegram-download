@@ -13,7 +13,15 @@ from tglib.db.session import Database
 
 log = logging.getLogger(__name__)
 
-DEFAULT_EXTS = "pdf,epub,djvu,mobi,azw3,doc,docx,txt,md,rtf,odt,zip,rar,7z"
+# The kinds of file the settings page offers, by extension. Keep in step with
+# frontend/src/lib/fileTypes.ts, which shows the same groups.
+BOOK_EXTS = "pdf,epub,djvu,mobi,azw3,doc,docx,txt,md,rtf,odt"
+ARCHIVE_EXTS = "zip,rar,7z"
+IMAGE_EXTS = "jpg,jpeg,png,webp,gif,heic,heif,bmp,tif,tiff"
+VIDEO_EXTS = "mp4,m4v,mkv,mov,avi,webm,3gp,wmv,flv,mpg,mpeg"
+AUDIO_EXTS = "mp3,m4a,ogg,oga,opus,wav,flac,aac,wma,amr"
+MEDIA_EXTS = f"{IMAGE_EXTS},{VIDEO_EXTS},{AUDIO_EXTS}"
+DEFAULT_EXTS = f"{BOOK_EXTS},{ARCHIVE_EXTS},{MEDIA_EXTS}"
 
 
 @dataclass
@@ -21,6 +29,10 @@ class AppSettings:
     allowed_exts: str = DEFAULT_EXTS
     max_size_mb: int = 0  # 0 = no limit
     workers: int = 3
+    # Pieces of one file asked for at once. 1 = one after the other, as
+    # Telegram's own apps do for accounts without Premium; more can be faster
+    # for big files, or bring flood waits that pause every download.
+    download_streams: int = 1
     scan_interval_hours: int = 6
     max_attempts: int = 5
     speed_limit_kbps: int = 0  # 0 = unlimited
@@ -58,6 +70,17 @@ def parse_exts(value: str | None) -> set[str]:
     return {"." + e.strip().lower().lstrip(".") for e in value.replace("،", ",").split(",") if e.strip()}
 
 
+def scan_kinds(exts: set[str]) -> list[str]:
+    """Which of Telegram's kinds of message a scan has to go through to find
+    files of these types: plain files always, photos and videos, audio."""
+    kinds = ["file"]
+    if exts & (parse_exts(IMAGE_EXTS) | parse_exts(VIDEO_EXTS)):
+        kinds.append("media")
+    if exts & parse_exts(AUDIO_EXTS):
+        kinds.append("audio")
+    return kinds
+
+
 def clean_exts(value: str) -> str:
     return ",".join(sorted(e.lstrip(".") for e in parse_exts(value)))
 
@@ -65,6 +88,7 @@ def clean_exts(value: str) -> str:
 LIMITS = {
     "max_size_mb": (0, 4096 * 1024),
     "workers": (1, 10),
+    "download_streams": (1, 8),
     "scan_interval_hours": (1, 24 * 7),
     "max_attempts": (1, 50),
     "speed_limit_kbps": (0, 1024 * 1024),

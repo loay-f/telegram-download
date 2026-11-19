@@ -10,8 +10,9 @@ import abc
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections import deque
+from collections.abc import AsyncIterator, Sequence
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,12 @@ log = logging.getLogger(__name__)
 
 # Longest flood wait slept through while listing chats (seconds).
 DIALOGS_FLOOD_SLEEP = 300
+
+# Pause between the requests of a scan (each returns 100 messages). Telethon's
+# own choice for a listing without an end is a full second, which caps a scan
+# at 100 messages a second however fast Telegram answers. If Telegram asks to
+# slow down, the scanner waits as told and continues where it stopped.
+SCAN_REQUEST_INTERVAL = 0.3
 
 
 @dataclass
@@ -57,7 +64,7 @@ class DocMessage:
     date: datetime | None  # naive UTC
     caption: str | None
     document: DocumentInfo
-    # Opaque object passed back to `iter_download` (Telethon Document).
+    # Opaque object passed back to `iter_download` (Telethon Document or Photo).
     handle: Any = field(default=None, repr=False)
 
 
@@ -82,7 +89,7 @@ class MediaInfo:
     width: int | None = None
     height: int | None = None
     has_preview: bool = False  # `download_preview` can return a picture
-    document: DocumentInfo | None = None  # plain files: what the library records
+    document: DocumentInfo | None = None  # files, photos, videos, audio: what the library records
 
 
 @dataclass
@@ -103,6 +110,8 @@ class ChatMessage:
     media: MediaInfo | None
     # Opaque object passed back to `download_preview` (Telethon Message).
     handle: Any = field(default=None, repr=False)
+    # The chat the message is in; only on results of a search across chats.
+    chat: DialogInfo | None = None
 
 
 @dataclass
@@ -174,20 +183,35 @@ class TelegramGateway(abc.ABC):
 
     @abc.abstractmethod
     def iter_document_messages(
-        self, chat_id: int, min_id: int, offset_id: int = 0
+        self, chat_id: int, min_id: int, offset_id: int = 0, kind: str = "file"
     ) -> AsyncIterator[DocMessage]:
-        """Messages with documents, newest first, with msg_id > min_id and
-        (if offset_id) msg_id < offset_id."""
+        """Messages carrying something to download, newest first, with
+        msg_id > min_id and (if offset_id) msg_id < offset_id. Telegram lists
+        them by `kind`: "file" (sent as a file), "media" (photos and videos)
+        or "audio" (music)."""
 
     @abc.abstractmethod
     async def get_document_message(self, chat_id: int, msg_id: int) -> DocMessage | None:
         """Fresh copy of one message (new file reference); None if deleted or
         not a document anymore."""
 
+    async def get_document_messages(self, chat_id: int, msg_ids: Sequence[int]) -> dict[int, DocMessage]:
+        """`get_document_message` for several messages of one chat (up to 100),
+        by message id; the ones that are gone are left out. Implementations
+        that can ask for them in one request do."""
+        found = {}
+        for msg_id in msg_ids:
+            dm = await self.get_document_message(chat_id, msg_id)
+            if dm is not None:
+                found[msg_id] = dm
+        return found
+
     @abc.abstractmethod
     def iter_download(
-        self, message: DocMessage, offset: int, request_size: int
-    ) -> AsyncIterator[bytes]: ...
+        self, message: DocMessage, offset: int, request_size: int, streams: int = 1
+    ) -> AsyncIterator[bytes]:
+        """The file's bytes from `offset` on, in order, `request_size` at a
+        time. With `streams` > 1 that many pieces are asked for at once."""
 
     @abc.abstractmethod
     async def search_documents(self, query: str, limit: int) -> list[tuple[DocMessage, DialogInfo]]:
@@ -209,6 +233,24 @@ class TelegramGateway(abc.ABC):
     ) -> list[ChatMessage]:
         """One page of a chat's messages, newest first: msg_id > min_id and
         (if offset_id) msg_id < offset_id. Reading doesn't mark anything read."""
+
+    @abc.abstractmethod
+    async def get_history_after(self, chat_id: int, after_id: int, limit: int = 50) -> list[ChatMessage]:
+        """The `limit` messages that come right after message `after_id`
+        (rather than the chat's newest ones), newest first."""
+
+    @abc.abstractmethod
+    async def search_history(
+        self, chat_id: int, query: str, *, offset_id: int = 0, limit: int = 50
+    ) -> list[ChatMessage]:
+        """One page of the chat's messages that match `query` (Telegram's own
+        search: message text, captions, file names), newest first, with
+        msg_id < offset_id if given."""
+
+    @abc.abstractmethod
+    async def search_messages(self, query: str, limit: int) -> list[ChatMessage]:
+        """Messages matching `query` across all of the account's chats, newest
+        first, each with its `chat`."""
 
     @abc.abstractmethod
     async def get_message(self, chat_id: int, msg_id: int) -> ChatMessage | None:
@@ -444,8 +486,14 @@ class TelethonGateway(TelegramGateway):
             self._client.flood_sleep_threshold = threshold
 
     def _to_doc_message(self, chat_id: int, msg) -> DocMessage | None:
+        from telethon.tl import types
+
+        if getattr(msg.media, "ttl_seconds", None):
+            return None  # view-once media stays unopened
         doc = getattr(msg, "document", None)
-        if doc is None or msg.file is None:
+        if doc is None:
+            return self._photo_message(chat_id, msg)
+        if msg.file is None or not isinstance(doc, types.Document):
             return None
         name = msg.file.name
         ext = None
@@ -468,15 +516,45 @@ class TelethonGateway(TelegramGateway):
             handle=doc,
         )
 
-    async def iter_document_messages(
-        self, chat_id: int, min_id: int, offset_id: int = 0
-    ) -> AsyncIterator[DocMessage]:
-        from telethon.tl.types import InputMessagesFilterDocument
+    def _photo_message(self, chat_id: int, msg) -> DocMessage | None:
+        """A photo (sent as a picture, not as a file) as something to download:
+        its largest size, which is what `iter_download` fetches."""
+        from telethon.tl import types
 
+        photo = getattr(msg, "photo", None)
+        if not isinstance(photo, types.Photo) or not photo.sizes:
+            return None
+        largest = photo.sizes[-1]
+        if isinstance(largest, types.PhotoSizeProgressive):
+            size = max(largest.sizes)
+        elif isinstance(largest, types.PhotoSize):
+            size = largest.size
+        else:
+            return None
+        return DocMessage(
+            chat_id=chat_id,
+            msg_id=msg.id,
+            date=_naive_utc(msg.date),
+            caption=msg.message or None,
+            # Photos have no name; they are JPEG.
+            document=DocumentInfo(tg_document_id=photo.id, file_name=None, ext=".jpg", mime="image/jpeg", size=size),
+            handle=photo,
+        )
+
+    async def iter_document_messages(
+        self, chat_id: int, min_id: int, offset_id: int = 0, kind: str = "file"
+    ) -> AsyncIterator[DocMessage]:
+        from telethon.tl import types
+
+        by_kind = {
+            "file": types.InputMessagesFilterDocument,
+            "media": types.InputMessagesFilterPhotoVideo,
+            "audio": types.InputMessagesFilterMusic,
+        }[kind]
         entity = await self._entity(chat_id)
         async with self._translate():
             async for msg in self._client.iter_messages(
-                entity, filter=InputMessagesFilterDocument, min_id=min_id, offset_id=offset_id
+                entity, filter=by_kind, min_id=min_id, offset_id=offset_id, wait_time=SCAN_REQUEST_INTERVAL
             ):
                 dm = self._to_doc_message(chat_id, msg)
                 if dm is not None:
@@ -489,6 +567,18 @@ class TelethonGateway(TelegramGateway):
         if msg is None:
             return None
         return self._to_doc_message(chat_id, msg)
+
+    async def get_document_messages(self, chat_id: int, msg_ids: Sequence[int]) -> dict[int, DocMessage]:
+        entity = await self._entity(chat_id)
+        async with self._translate():
+            # One request for up to 100 ids; a deleted message comes back as None.
+            msgs = await self._client.get_messages(entity, ids=list(msg_ids))
+        found = {}
+        for msg in msgs:
+            dm = self._to_doc_message(chat_id, msg) if msg is not None else None
+            if dm is not None:
+                found[dm.msg_id] = dm
+        return found
 
     async def search_documents(self, query: str, limit: int) -> list[tuple[DocMessage, DialogInfo]]:
         from telethon import utils
@@ -568,7 +658,11 @@ class TelethonGateway(TelegramGateway):
         if isinstance(media, types.MessageMediaPhoto) and isinstance(media.photo, types.Photo):
             sizes = _preview_sizes(msg)
             w, h = (sizes[-1].w, sizes[-1].h) if sizes else (None, None)
-            return MediaInfo("photo", width=w, height=h, has_preview=bool(sizes))
+            dm = self._photo_message(chat_id, msg)
+            return MediaInfo(
+                "photo", size=dm.document.size if dm else None, width=w, height=h,
+                has_preview=bool(sizes), document=dm.document if dm else None,
+            )
         if isinstance(media, types.MessageMediaDocument) and isinstance(media.document, types.Document):
             f = msg.file
             info = MediaInfo("file", name=f.name, size=f.size, has_preview=bool(_preview_sizes(msg)))
@@ -589,6 +683,9 @@ class TelethonGateway(TelegramGateway):
                 dm = self._to_doc_message(chat_id, msg)
                 info.document = dm.document if dm else None
                 info.has_preview = False  # shown as a file, not as a picture
+            if info.kind in ("video", "audio"):
+                dm = self._to_doc_message(chat_id, msg)
+                info.document = dm.document if dm else None
             if info.kind in ("sticker", "gif", "round", "video"):
                 info.width, info.height = f.width, f.height
             if info.kind in ("gif", "round", "video", "voice", "audio") and f.duration:
@@ -613,6 +710,36 @@ class TelethonGateway(TelegramGateway):
             msgs = await self._client.get_messages(entity, limit=limit, offset_id=offset_id, min_id=min_id)
         return [self._to_chat_message(chat_id, m) for m in msgs]
 
+    async def get_history_after(self, chat_id: int, after_id: int, limit: int = 50) -> list[ChatMessage]:
+        entity = await self._entity(chat_id)
+        async with self._translate():
+            # In reverse the offset is where reading starts, and it goes up.
+            msgs = await self._client.get_messages(entity, limit=limit, offset_id=after_id, reverse=True)
+        return [self._to_chat_message(chat_id, m) for m in reversed(msgs)]
+
+    async def search_history(
+        self, chat_id: int, query: str, *, offset_id: int = 0, limit: int = 50
+    ) -> list[ChatMessage]:
+        entity = await self._entity(chat_id)
+        async with self._translate():
+            msgs = await self._client.get_messages(entity, limit=limit, search=query, offset_id=offset_id)
+        return [self._to_chat_message(chat_id, m) for m in msgs]
+
+    async def search_messages(self, query: str, limit: int) -> list[ChatMessage]:
+        from telethon import utils
+
+        found = []
+        async with self._translate():
+            async for msg in self._client.iter_messages(None, search=query, limit=limit):
+                chat_id = utils.get_peer_id(msg.peer_id)
+                chat = msg.chat or await msg.get_chat()
+                info = _dialog_info(chat, chat_id, utils.get_display_name(chat)) if chat else None
+                if info is not None:
+                    message = self._to_chat_message(chat_id, msg)
+                    message.chat = info
+                    found.append(message)
+        return found
+
     async def get_message(self, chat_id: int, msg_id: int) -> ChatMessage | None:
         entity = await self._entity(chat_id)
         async with self._translate():
@@ -631,8 +758,14 @@ class TelethonGateway(TelegramGateway):
         return data or None
 
     async def iter_download(
-        self, message: DocMessage, offset: int, request_size: int
+        self, message: DocMessage, offset: int, request_size: int, streams: int = 1
     ) -> AsyncIterator[bytes]:
+        if streams > 1:
+            # Closed with this generator, so nothing asked for ahead outlives it.
+            async with aclosing(self._iter_download_ahead(message, offset, request_size, streams)) as pieces:
+                async for chunk in pieces:
+                    yield chunk
+            return
         it = self._client.iter_download(
             message.handle,
             offset=offset,
@@ -646,6 +779,52 @@ class TelethonGateway(TelegramGateway):
         finally:
             # Releases the borrowed connection if the file lives on another DC.
             await it.close()
+
+    async def _iter_download_ahead(
+        self, message: DocMessage, offset: int, request_size: int, streams: int
+    ) -> AsyncIterator[bytes]:
+        """`iter_download` with up to `streams` pieces requested at once. They
+        are still handed over in order, so whoever writes them needs to know
+        nothing about it; at most `streams` pieces wait in memory."""
+        size = message.document.size
+        offsets = iter(range(offset, size, request_size))
+        ahead: deque[asyncio.Task[bytes]] = deque()
+        try:
+            while True:
+                while len(ahead) < streams and (at := next(offsets, None)) is not None:
+                    ahead.append(asyncio.create_task(self._download_piece(message, at, request_size)))
+                if not ahead:
+                    break
+                chunk = await ahead[0]
+                ahead.popleft()
+                yield chunk
+        finally:
+            for task in ahead:
+                task.cancel()
+            await asyncio.gather(*ahead, return_exceptions=True)
+
+    async def _download_piece(self, message: DocMessage, offset: int, request_size: int) -> bytes:
+        """One piece of the file: `request_size` bytes at `offset`, or what is
+        left of the file there."""
+        it = self._client.iter_download(
+            message.handle,
+            offset=offset,
+            limit=1,
+            request_size=request_size,
+            file_size=message.document.size,
+        )
+        chunk = b""
+        try:
+            async with self._translate():
+                async for piece in it:
+                    chunk = bytes(piece)
+        finally:
+            await it.close()
+        if len(chunk) != min(request_size, message.document.size - offset):
+            # Written where the next piece belongs, a short one would corrupt
+            # the file: stop, and the download continues from what is saved.
+            raise NotConnected(f"Telegram sent {len(chunk)} bytes at {offset}, fewer than asked for")
+        return chunk
 
 
 def _dialog_info(entity, chat_id: int, name: str | None) -> DialogInfo | None:

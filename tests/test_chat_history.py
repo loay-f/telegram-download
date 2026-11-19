@@ -267,6 +267,130 @@ def test_reading_needs_the_app_password(settings, gw):
         assert c.get(f"/api/chats/{CHANNEL}/messages/1/preview").status_code == 401
 
 
+# ----------------------------------------------- searching inside a chat
+def test_search_finds_matching_messages_newest_first(client, gw):
+    for i in range(1, 41):
+        gw.say(CHANNEL, i, f"كتاب الفقه {i}" if i % 2 else f"درس {i}")
+    gw.post(CHANNEL, 50, FakeFile(900, "الفقه الميسر.pdf", b"x"))  # found by its file name
+
+    r = client.get(f"/api/chats/{CHANNEL}/messages/search", params={"q": "  الفقه ", "limit": 8})
+    assert r.status_code == 200
+    assert ids(r) == [50, 39, 37, 35, 33, 31, 29, 27] and r.json()["has_more"] is True
+    assert r.json()["messages"][0]["media"]["name"] == "الفقه الميسر.pdf"
+    assert gw.search_calls == [(CHANNEL, "الفقه", 0, 8)]
+
+    r = client.get(f"/api/chats/{CHANNEL}/messages/search", params={"q": "الفقه", "limit": 8, "before": 27})
+    assert ids(r) == [25, 23, 21, 19, 17, 15, 13, 11]
+    r = client.get(f"/api/chats/{CHANNEL}/messages/search", params={"q": "الفقه", "limit": 8, "before": 11})
+    assert ids(r) == [9, 7, 5, 3, 1] and r.json()["has_more"] is False
+
+    # The same search again doesn't ask Telegram again.
+    client.get(f"/api/chats/{CHANNEL}/messages/search", params={"q": "الفقه", "limit": 8})
+    assert len(gw.search_calls) == 3
+
+
+def test_search_with_nothing_to_find_or_nothing_to_look_for(client, gw):
+    gw.say(CHANNEL, 1, "مرحبا")
+    r = client.get(f"/api/chats/{CHANNEL}/messages/search", params={"q": "غير موجود"})
+    assert r.json() == {"messages": [], "has_more": False}
+    r = client.get(f"/api/chats/{CHANNEL}/messages/search", params={"q": "   "})
+    assert r.json() == {"messages": [], "has_more": False} and len(gw.search_calls) == 1
+    assert client.get(f"/api/chats/{CHANNEL}/messages/search").status_code == 422
+    assert client.get(f"/api/chats/{CHANNEL}/messages/search", params={"q": "x" * 201}).status_code == 422
+    assert client.get("/api/chats/-999/messages/search", params={"q": "x"}).status_code == 404
+
+
+def test_search_failures_are_reported_like_reading(client, gw):
+    gw.say(CHANNEL, 1, "مرحبا")
+    gw.flood_on_next["search"] = 25
+    r = client.get(f"/api/chats/{CHANNEL}/messages/search", params={"q": "مرحبا"})
+    assert r.status_code == 429 and r.headers["retry-after"] == "25"
+    # Telegram asked us to wait: reading is held back too.
+    assert client.get(f"/api/chats/{CHANNEL}/messages").status_code == 429
+    client.post("/api/telegram/logout")
+    r = client.get(f"/api/chats/{CHANNEL}/messages/search", params={"q": "مرحبا"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "telegram_not_ready"
+
+
+def test_reading_around_a_message_and_on_from_there(client, gw):
+    for i in range(1, 121):
+        gw.say(CHANNEL, i, f"رسالة {i}")
+
+    # A found message opens with what surrounds it.
+    r = client.get(f"/api/chats/{CHANNEL}/messages", params={"around": 60, "limit": 20})
+    assert ids(r) == list(range(51, 71))
+    assert r.json()["has_more"] is True and r.json()["has_newer"] is True
+
+    # Reading on towards the newest, a page at a time.
+    r = client.get(f"/api/chats/{CHANNEL}/messages", params={"after": 70, "forward": True, "limit": 30})
+    assert ids(r) == list(range(71, 101)) and r.json()["has_newer"] is True
+    r = client.get(f"/api/chats/{CHANNEL}/messages", params={"after": 100, "forward": True, "limit": 30})
+    assert ids(r) == list(range(101, 121)) and r.json()["has_newer"] is False
+
+    # Near either end of the chat.
+    r = client.get(f"/api/chats/{CHANNEL}/messages", params={"around": 118, "limit": 20})
+    assert ids(r) == list(range(109, 121)) and r.json()["has_newer"] is False
+    r = client.get(f"/api/chats/{CHANNEL}/messages", params={"around": 3, "limit": 20})
+    assert ids(r) == list(range(1, 14)) and r.json()["has_more"] is False
+
+    # Ordinary pages say they end at the newest message.
+    assert client.get(f"/api/chats/{CHANNEL}/messages").json()["has_newer"] is False
+
+
+# ------------------------------------------------ searching every chat
+def test_search_across_chats_finds_messages_and_says_where(client, gw):
+    gw.say(CHANNEL, 3, "درس في أصول الفقه")
+    gw.say(-1002, 8, "من يعرف كتاباً في الفقه؟", sender="خالد")
+    gw.say(-1002, 9, "لا علاقة لها")
+    gw.post(CHANNEL, 20, FakeFile(900, "الفقه الميسر.pdf", b"x"))
+
+    r = client.get("/api/search/messages", params={"q": " الفقه "})
+    assert r.status_code == 200
+    items = r.json()["items"]
+    # Newest first; the file is left to the search for files.
+    assert [(m["chat"]["id"], m["id"]) for m in items] == [(-1002, 8), (CHANNEL, 3)]
+    assert items[0]["chat"] == {"id": -1002, "title": "مجموعة", "type": "group"}
+    assert items[0]["sender"] == "خالد" and items[0]["text"] == "من يعرف كتاباً في الفقه؟"
+    assert items[0]["media"] is None
+    assert r.json()["has_more"] is False
+    assert [h["name"] for h in client.get("/api/search", params={"q": "الفقه"}).json()["items"]] == ["الفقه الميسر.pdf"]
+    assert gw.global_search_calls == [("الفقه", 30)]
+
+    # Asked again, Telegram isn't; a full page says there may be more.
+    client.get("/api/search/messages", params={"q": "الفقه"})
+    assert len(gw.global_search_calls) == 1
+    r = client.get("/api/search/messages", params={"q": "الفقه", "limit": 2})
+    assert [m["id"] for m in r.json()["items"]] == [8] and r.json()["has_more"] is True
+
+
+def test_a_message_found_in_a_chat_not_listed_yet_can_be_opened(client, gw):
+    gw.add_chat(-1009, "قناة جديدة")  # joined after the chat list was last synced
+    for i in range(1, 31):
+        gw.say(-1009, i, "نص فريد" if i == 12 else "x")
+    assert client.get("/api/chats/-1009/messages").status_code == 404
+
+    items = client.get("/api/search/messages", params={"q": "فريد"}).json()["items"]
+    assert [(m["chat"]["id"], m["id"]) for m in items] == [(-1009, 12)]
+    r = client.get("/api/chats/-1009/messages", params={"around": 12, "limit": 10})
+    assert ids(r) == list(range(8, 18))
+    # The same holds for a file found by the search for files.
+    gw.add_chat(-1010, "قناة ملفات")
+    gw.post(-1010, 4, FakeFile(901, "كتاب نادر.pdf", b"x"))
+    assert len(client.get("/api/search", params={"q": "نادر"}).json()["items"]) == 1
+    assert client.get("/api/chats/-1010/messages").status_code == 200
+
+
+def test_search_across_chats_refuses_what_it_cannot_do(client, gw):
+    assert client.get("/api/search/messages", params={"q": "x"}).status_code == 422
+    assert client.get("/api/search/messages", params={"q": "xx", "limit": 101}).status_code == 422
+    assert client.get("/api/search/messages", params={"q": " x "}).json() == {"items": [], "has_more": False}
+    gw.flood_on_next["search"] = 30
+    assert client.get("/api/search/messages", params={"q": "كتاب"}).status_code == 429
+    client.post("/api/telegram/logout")
+    r = client.get("/api/search/messages", params={"q": "كتاب"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "telegram_not_ready"
+
+
 # --------------------------------------------------------- the service
 async def test_simultaneous_requests_share_one_telegram_request(settings):
     gw = gateway(messages=3)

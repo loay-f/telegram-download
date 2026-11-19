@@ -8,7 +8,7 @@ from telethon import errors
 from telethon.tl import types
 
 from tglib.engine.errors import ChatUnavailable, FileRefExpired, FloodWait, NotAuthorized, NotConnected
-from tglib.engine.telegram import TelethonGateway
+from tglib.engine.telegram import SCAN_REQUEST_INTERVAL, DocMessage, DocumentInfo, TelethonGateway
 
 
 @pytest.fixture
@@ -217,6 +217,55 @@ def test_photo(gw):
     assert m.out is True
     assert (m.media.kind, m.media.width, m.media.height, m.media.has_preview) == ("photo", 1280, 800, True)
     assert m.handle is msg
+    assert (m.media.document.ext, m.media.size) == (".jpg", 5000)  # can be added to the library
+
+
+def test_photo_as_something_to_download(gw):
+    photo = make_photo()
+    msg = types.Message(
+        id=11, peer_id=types.PeerUser(3), date=DATE, message="تعليق", media=types.MessageMediaPhoto(photo=photo)
+    )
+    dm = gw._to_doc_message(3, msg)
+    d = dm.document
+    # Its last size is the one Telethon downloads.
+    assert (d.tg_document_id, d.file_name, d.ext, d.mime, d.size) == (1, None, ".jpg", "image/jpeg", 5000)
+    assert dm.handle is photo and dm.caption == "تعليق" and dm.msg_id == 11
+
+    photo.sizes.append(types.PhotoSizeProgressive(type="w", w=2560, h=1600, sizes=[500, 9000, 400000]))
+    assert gw._to_doc_message(3, media_message(types.MessageMediaPhoto(photo=photo))).document.size == 400000
+
+    once = media_message(types.MessageMediaPhoto(photo=make_photo(), ttl_seconds=10))
+    assert gw._to_doc_message(3, once) is None  # view-once stays unopened
+    stripped = types.Photo(id=2, access_hash=2, file_reference=b"", date=DATE, dc_id=2,
+                           sizes=[types.PhotoStrippedSize(type="i", bytes=b"\x01")])
+    assert gw._to_doc_message(3, media_message(types.MessageMediaPhoto(photo=stripped))) is None
+
+
+@pytest.mark.parametrize(
+    "kind, wanted",
+    [
+        ("file", types.InputMessagesFilterDocument),
+        ("media", types.InputMessagesFilterPhotoVideo),
+        ("audio", types.InputMessagesFilterMusic),
+    ],
+)
+async def test_each_kind_of_scan_asks_telegram_with_its_filter(gw, monkeypatch, kind, wanted):
+    calls = []
+
+    async def fake_input_entity(chat_id):
+        return types.InputPeerChannel(1234, 1)
+
+    async def fake_iter_messages(entity, **kw):
+        calls.append(kw)
+        yield media_message(types.MessageMediaPhoto(photo=make_photo()))
+        yield types.Message(id=12, peer_id=types.PeerUser(3), date=DATE, message="نص فقط")
+
+    monkeypatch.setattr(gw._client, "get_input_entity", fake_input_entity)
+    monkeypatch.setattr(gw._client, "iter_messages", fake_iter_messages)
+    found = [dm async for dm in gw.iter_document_messages(-1001234, 5, 40, kind)]
+    assert [dm.msg_id for dm in found] == [11]
+    # Paced by us: Telethon's own pause for an open-ended listing is a second.
+    assert calls == [{"filter": wanted, "min_id": 5, "offset_id": 40, "wait_time": SCAN_REQUEST_INTERVAL}]
 
 
 def test_view_once_photo_is_not_opened(gw):
@@ -264,7 +313,9 @@ def test_document_kinds(gw, attributes, mime, thumbs, expected):
     msg = media_message(types.MessageMediaDocument(document=make_document(attributes, mime, thumbs)))
     info = gw._to_chat_message(3, msg).media
     assert (info.kind, info.name, info.duration, info.width, info.height, info.has_preview) == expected
-    assert info.size == 999 and info.document is None
+    assert info.size == 999
+    # Videos and music can be added to the library; the rest are only shown.
+    assert (info.document is not None) == (info.kind in ("video", "audio"))
 
 
 def test_plain_file_carries_what_the_library_needs(gw):
@@ -316,6 +367,33 @@ async def test_history_is_one_request_newest_first(gw, monkeypatch):
     assert [(m.id, m.text) for m in page] == [(9, "9"), (8, "8")]
     assert calls == [{"limit": 50, "offset_id": 10, "min_id": 3}]
     assert (await gw.get_message(-1001234, 8)).text == "واحدة"
+
+
+async def test_search_and_reading_forward_are_one_request_each(gw, monkeypatch):
+    calls = []
+
+    async def fake_input_entity(chat_id):
+        return types.InputPeerChannel(1234, 1)
+
+    async def fake_get_messages(entity, **kw):
+        calls.append(kw)
+        order = (11, 12) if kw.get("reverse") else (9, 8)  # Telethon returns oldest first in reverse
+        return [
+            types.Message(id=i, peer_id=types.PeerChannel(1234), date=DATE, message=str(i), post=True)
+            for i in order
+        ]
+
+    monkeypatch.setattr(gw._client, "get_input_entity", fake_input_entity)
+    monkeypatch.setattr(gw._client, "get_messages", fake_get_messages)
+
+    found = await gw.search_history(-1001234, "كتاب", offset_id=10, limit=30)
+    assert [m.id for m in found] == [9, 8]
+    after = await gw.get_history_after(-1001234, 10, limit=20)
+    assert [m.id for m in after] == [12, 11]  # newest first, like every page
+    assert calls == [
+        {"limit": 30, "search": "كتاب", "offset_id": 10},
+        {"limit": 20, "offset_id": 10, "reverse": True},
+    ]
 
 
 @pytest.mark.parametrize("full, size", [(False, "m"), (True, "y")])

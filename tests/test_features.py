@@ -302,3 +302,77 @@ def test_migration_turns_queued_files_into_available(settings):
     assert got == {1: "available", 2: "available", 3: "done", 4: "failed"}
     assert con.execute("SELECT count(*) FROM documents WHERE series_key IS NULL").fetchone()[0] == 4
     con.close()
+
+
+def test_migration_adds_pictures_video_and_audio_to_saved_file_types(settings):
+    settings.ensure_dirs()
+    cfg = alembic_config(settings.db_path)
+    command.upgrade(cfg, "0003")
+    con = sqlite3.connect(settings.db_path)
+    con.execute("INSERT INTO settings (key, value) VALUES ('allowed_exts', 'pdf,cbz')")
+    con.execute(
+        "INSERT INTO chats (id, title, tracked, auto_download, last_scanned_msg_id, is_member)"
+        " VALUES (-1001, 'قناة', 1, 0, 50, 1)"
+    )
+    con.commit()
+    con.close()
+    command.upgrade(cfg, "head")
+    con = sqlite3.connect(settings.db_path)
+    exts = con.execute("SELECT value FROM settings WHERE key = 'allowed_exts'").fetchone()[0].split(",")
+    assert {"pdf", "cbz", "jpg", "png", "mp4", "mkv", "mp3"} <= set(exts) and len(exts) == len(set(exts))
+    # Files keep their place; photos, videos and audio start from the beginning.
+    row = con.execute("SELECT last_scanned_msg_id, media_scanned_msg_id, audio_scanned_msg_id FROM chats").fetchone()
+    assert row == (50, 0, 0)
+    con.close()
+    command.downgrade(cfg, "0003")
+
+
+def test_default_file_types_cover_every_kind():
+    from tglib.engine.settings_store import scan_kinds
+
+    exts = AppSettings().ext_set()
+    assert {".pdf", ".epub", ".zip", ".jpg", ".png", ".mp4", ".mkv", ".mp3", ".flac"} <= exts
+    assert scan_kinds(exts) == ["file", "media", "audio"]
+    assert scan_kinds({".pdf"}) == ["file"]
+    assert scan_kinds({".pdf", ".png"}) == ["file", "media"]
+    assert scan_kinds({".mp3"}) == ["file", "audio"]
+
+
+def test_excluding_a_format_hides_what_is_only_listed_and_allowing_it_brings_it_back(settings):
+    gw = FakeGateway()
+    gw.add_chat(-1001, "قناة")
+    gw.post(-1001, 1, FakeFile(1, "book.pdf", b"b"))
+    gw.post(-1001, 2, FakeFile(2, "a.gif", b"g", mime="image/gif"))
+    gw.post(-1001, 3, FakeFile(3, "b.png", b"p", mime="image/png"))
+    gw.post(-1001, 4, FakeFile(4, "c.gif", b"h", mime="image/gif"))
+
+    def listed(c, status="available"):
+        items = c.get("/api/documents", params={"status": status}).json()["items"]
+        return sorted(i["name"] for i in items)
+
+    with TestClient(create_app(settings, lambda: gw)) as c:
+        login(c)
+        wait_for_state(c, "ready")
+        sync_chats(c)
+        c.post("/api/chats/-1001/track", json={"tracked": True})
+        wait_until(lambda: len(listed(c)) == 4)
+        # One of the GIFs is downloaded before GIFs are excluded.
+        gif = next(i for i in c.get("/api/documents", params={"status": "available"}).json()["items"] if i["name"] == "c.gif")
+        c.post("/api/documents/download", json={"ids": [gif["id"]]})
+        wait_until(lambda: c.get(f"/api/documents/{gif['id']}").json()["has_file"])
+
+        everything = c.get("/api/settings").json()["allowed_exts"].split(",")
+        r = c.post("/api/settings", json={"allowed_exts": ",".join(e for e in everything if e != "gif")}).json()
+        assert (r["hidden"], r["reopened"]) == (1, 0)
+        assert listed(c) == ["b.png", "book.pdf"] and listed(c, "skipped") == ["a.gif"]
+        assert c.get(f"/api/documents/{gif['id']}").json()["has_file"]  # what was downloaded stays
+
+        # A chat's own choice works the same way, in both directions.
+        r = c.post("/api/chats/-1001/settings", json={"allowed_exts": "pdf"}).json()
+        assert (r["hidden"], r["reopened"]) == (1, 0) and listed(c) == ["book.pdf"]
+        r = c.post("/api/chats/-1001/settings", json={"allowed_exts": None}).json()
+        assert (r["hidden"], r["reopened"]) == (0, 1) and listed(c) == ["b.png", "book.pdf"]
+
+        r = c.post("/api/settings", json={"allowed_exts": ",".join(everything)}).json()
+        assert (r["hidden"], r["reopened"]) == (0, 1)
+        assert listed(c) == ["a.gif", "b.png", "book.pdf"]

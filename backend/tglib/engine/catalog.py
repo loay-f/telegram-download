@@ -1,13 +1,14 @@
 """Recording scanned messages into documents/appearances, with the
 pre-download duplicate check, and turning documents into download requests."""
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tglib.db.models import Appearance, Chat, Document, DocStatus, utcnow
-from tglib.engine.normalize import normalize_name, split_ext
+from tglib.engine.normalize import fold, normalize_name, split_ext
 from tglib.engine.settings_store import AppSettings, parse_exts
 from tglib.engine.telegram import DialogInfo, DocMessage
 from tglib.engine.volumes import parse_volume
@@ -25,6 +26,9 @@ _DEDUP_CANDIDATE_STATUSES = (
     DocStatus.DONE,
     DocStatus.DUPLICATE,
 )
+
+# Ids per statement, well under SQLite's bound-parameter limit.
+IN_CHUNK = 500
 
 
 @dataclass
@@ -72,9 +76,61 @@ def decide(rejection: str | None, match: Document | None, auto_download: bool = 
     return Decision(DocStatus.DUPLICATE, duplicate_of_id=match.duplicate_of_id or match.id)
 
 
+def fallback_name(dm: DocMessage, ext: str | None) -> str:
+    """A name for a file that has none (photos, most videos): what it is,
+    the day it was posted and its message, e.g. photo_2024-05-01_1234.jpg."""
+    mime = dm.document.mime or ""
+    what = next((w for w in ("image", "video", "audio") if mime.startswith(w)), None)
+    if what is None:
+        return f"telegram-{dm.document.tg_document_id}{ext or ''}"
+    what = "photo" if what == "image" else what
+    day = f"{dm.date:%Y-%m-%d}_" if dm.date else ""
+    return f"{what}_{day}{dm.msg_id}{ext or ''}"
+
+
 def doc_ext(dm: DocMessage) -> str | None:
     _, ext = split_ext(dm.document.file_name)
     return ext or dm.document.ext
+
+
+def search_text(name: str | None, captions: Iterable[str | None] = ()) -> str:
+    """What the library's search looks through for a document: its name, then
+    each caption it was posted with, folded, one per line."""
+    parts = [fold(name or "")]
+    for caption in captions:
+        folded = fold(caption) if caption else ""
+        if folded and not any(folded in p for p in parts):
+            parts.append(folded)
+    return "\n".join(parts)
+
+
+def _add_caption(doc: Document, caption: str | None) -> None:
+    """A new post of a known document: its caption becomes searchable too."""
+    if not caption:
+        return
+    known = doc.search_text if doc.search_text is not None else search_text(doc.original_name)
+    folded = fold(caption)
+    doc.search_text = known if folded in known else f"{known}\n{folded}"
+
+
+async def backfill_search_text(s: AsyncSession) -> int:
+    """Fills the search text of documents recorded before it existed, in one
+    statement (`fold` is registered on the app's connections)."""
+    res = await s.execute(
+        text(
+            """
+            UPDATE documents SET search_text = fold(coalesce(original_name, '')) || coalesce(
+                char(10) || (
+                    SELECT group_concat(c, char(10)) FROM (
+                        SELECT DISTINCT fold(a.caption) AS c FROM appearances a
+                        WHERE a.document_id = documents.id AND a.caption IS NOT NULL AND a.caption != ''
+                    )
+                ), '')
+            WHERE search_text IS NULL
+            """
+        )
+    )
+    return res.rowcount or 0
 
 
 async def find_name_size_match(
@@ -107,95 +163,225 @@ def _apply(doc: Document, d: Decision) -> None:
         doc.completed_at = utcnow()
 
 
+async def _filters_by_chat(s: AsyncSession, settings: AppSettings) -> dict[int, Filters]:
+    return {c.id: Filters.for_chat(c, settings) for c in (await s.execute(select(Chat))).scalars()}
+
+
+def _chunks(ids: Sequence[int], size: int = IN_CHUNK) -> Iterable[Sequence[int]]:
+    return (ids[i : i + size] for i in range(0, len(ids), size))
+
+
 async def reapply_filters(s: AsyncSession, settings: AppSettings) -> int:
     """After the filter settings change, documents skipped by a filter come
     back if any chat they appeared in now accepts them. Returns how many."""
-    rows = (
-        await s.execute(
-            select(Document, Chat)
-            .join(Appearance, Appearance.document_id == Document.id)
-            .join(Chat, Chat.id == Appearance.chat_id)
-            .where(Document.status == DocStatus.SKIPPED, Document.last_error.like("filtered:%"))
-        )
-    ).all()
-    accepted: dict[int, tuple[Document, Filters]] = {}
-    for doc, chat in rows:
-        filters = Filters.for_chat(chat, settings)
-        if doc.id not in accepted and filters.rejection(doc.ext, doc.size) is None:
-            accepted[doc.id] = (doc, filters)
-    for doc, filters in accepted.values():
-        match = await find_name_size_match(s, doc.size, doc.normalized_name or "", doc.id)
-        _apply(doc, decide(None, match, filters.auto_download))
+    # Plain columns: there can be hundreds of thousands of skipped files, and
+    # only the ones coming back are needed as objects.
+    rows = await s.execute(
+        select(Document.id, Document.ext, Document.size, Appearance.chat_id)
+        .join(Appearance, Appearance.document_id == Document.id)
+        .where(Document.status == DocStatus.SKIPPED, Document.last_error.like("filtered:%"))
+    )
+    filters = await _filters_by_chat(s, settings)
+    accepted: dict[int, Filters] = {}
+    for doc_id, ext, size, chat_id in rows:
+        f = filters.get(chat_id)
+        if f is not None and doc_id not in accepted and f.rejection(ext, size) is None:
+            accepted[doc_id] = f
+    for chunk in _chunks(sorted(accepted)):
+        docs = (await s.execute(select(Document).where(Document.id.in_(chunk)).order_by(Document.id))).scalars().all()
+        for doc in docs:
+            # The lookup sees the documents decided before this one: a query
+            # flushes what is pending first.
+            match = await find_name_size_match(s, doc.size, doc.normalized_name or "", doc.id)
+            _apply(doc, decide(None, match, accepted[doc.id].auto_download))
         await s.flush()
     return len(accepted)
 
 
-async def record_message(s: AsyncSession, chat: Chat, dm: DocMessage, filters: Filters) -> str:
-    """Upserts one scanned message. Returns what happened:
-    'known' (already recorded), 'appearance' (new place for a known document),
-    or the new document's status."""
-    info = dm.document
-    existing_app = await s.get(Appearance, (chat.id, dm.msg_id))
-    doc = (
-        await s.execute(select(Document).where(Document.tg_document_id == info.tg_document_id))
-    ).scalars().first()
-
-    if existing_app is not None and doc is not None and existing_app.document_id == doc.id:
-        return "known"
-
-    if doc is not None:
-        outcome = "appearance"
-        # Rejected by another chat's filters, but this chat accepts it.
-        if doc.status == DocStatus.SKIPPED and (doc.last_error or "").startswith("filtered:"):
-            if filters.rejection(doc.ext, doc.size) is None:
-                match = await find_name_size_match(s, doc.size, doc.normalized_name or "", doc.id)
-                _apply(doc, decide(None, match, filters.auto_download))
-                outcome = doc.status
-        # Listed from another chat, and this chat downloads automatically.
-        elif doc.status == DocStatus.AVAILABLE and filters.auto_download:
-            doc.status = DocStatus.PENDING
-            outcome = doc.status
-    else:
-        ext = doc_ext(dm)
-        normalized = normalize_name(info.file_name)
-        series_key, volume = parse_volume(normalized)
-        rejection = filters.rejection(ext, info.size)
-        match = None if rejection else await find_name_size_match(s, info.size, normalized)
-        doc = Document(
-            tg_document_id=info.tg_document_id,
-            original_name=info.file_name or f"telegram-{info.tg_document_id}{ext or ''}",
-            normalized_name=normalized,
-            series_key=series_key,
-            volume=volume,
-            ext=ext,
-            mime=info.mime,
-            size=info.size,
-            first_seen_at=utcnow(),
-            priority=0,
-            bytes_downloaded=0,
-            attempts=0,
-        )
-        _apply(doc, decide(rejection, match, filters.auto_download))
-        s.add(doc)
-        await s.flush()
-        outcome = doc.status
-
-    if existing_app is not None:
-        # The message was edited to carry a different file.
-        existing_app.document_id = doc.id
-        existing_app.caption = dm.caption
-    else:
-        s.add(
-            Appearance(
-                chat_id=chat.id,
-                msg_id=dm.msg_id,
-                document_id=doc.id,
-                posted_at=dm.date,
-                caption=dm.caption,
+async def hide_rejected(s: AsyncSession, settings: AppSettings) -> int:
+    """After a file type is excluded (or the size limit lowered), files that
+    were only listed and that no chat they appeared in accepts any more leave
+    the list. Nothing downloaded, queued or downloading is touched, and they
+    come back if the type is allowed again (`reapply_filters`). Returns how
+    many."""
+    rows = await s.execute(
+        select(Document.id, Document.ext, Document.size, Appearance.chat_id)
+        .join(Appearance, Appearance.document_id == Document.id)
+        .where(Document.status == DocStatus.AVAILABLE)
+    )
+    filters = await _filters_by_chat(s, settings)
+    verdict: dict[int, str | None] = {}
+    for doc_id, ext, size, chat_id in rows:
+        if doc_id in verdict and verdict[doc_id] is None:
+            continue  # some chat accepts it
+        f = filters.get(chat_id)
+        if f is not None:
+            verdict[doc_id] = f.rejection(ext, size)
+    by_reason: dict[str, list[int]] = {}
+    for doc_id, rejection in verdict.items():
+        if rejection:
+            by_reason.setdefault(rejection, []).append(doc_id)
+    hidden = 0
+    for reason, ids in by_reason.items():
+        for chunk in _chunks(ids):
+            res = await s.execute(
+                update(Document)
+                .where(Document.id.in_(chunk), Document.status == DocStatus.AVAILABLE)
+                .values(status=DocStatus.SKIPPED, last_error=reason)
             )
+            hidden += res.rowcount or 0
+    return hidden
+
+
+def _best_match(candidates: Sequence[Document]) -> Document | None:
+    """As `find_name_size_match` orders them: one that already has content
+    first, then the oldest. `candidates` are oldest first."""
+    live = [d for d in candidates if d.status in _DEDUP_CANDIDATE_STATUSES]
+    return next((d for d in live if d.blob_id is not None), live[0] if live else None)
+
+
+async def record_messages(s: AsyncSession, chat: Chat, batch: Sequence[DocMessage], filters: Filters) -> list[str]:
+    """Upserts scanned messages of one chat. Returns what happened to each:
+    'known' (already recorded), 'appearance' (new place for a known document),
+    or the new document's status.
+
+    What the batch needs from the tables is read with a few queries and what
+    it adds is written together, instead of several statements per message:
+    the write connection is the only one, and downloads wait for it."""
+    if not batch:
+        return []
+    apps: dict[int, Appearance] = {
+        a.msg_id: a
+        for a in (
+            await s.execute(
+                select(Appearance).where(
+                    Appearance.chat_id == chat.id, Appearance.msg_id.in_([dm.msg_id for dm in batch])
+                )
+            )
+        ).scalars()
+    }
+    docs: dict[int, Document] = {
+        d.tg_document_id: d
+        for d in (
+            await s.execute(
+                select(Document).where(
+                    Document.tg_document_id.in_({dm.document.tg_document_id for dm in batch})
+                )
+            )
+        ).scalars()
+    }
+
+    # New documents: what each is, and the ones it may be a name+size
+    # duplicate of (oldest first; this batch's own are appended as they come).
+    described: dict[int, tuple[str | None, str, str | None]] = {}  # tg id -> ext, normalized name, rejection
+    for dm in batch:
+        info = dm.document
+        if info.tg_document_id not in docs and info.tg_document_id not in described:
+            ext = doc_ext(dm)
+            described[info.tg_document_id] = (ext, normalize_name(info.file_name), filters.rejection(ext, info.size))
+    same_name: dict[tuple[int, str], list[Document]] = {}
+    wanted = {
+        (dm.document.size, described[dm.document.tg_document_id][1])
+        for dm in batch
+        if dm.document.tg_document_id in described
+        and described[dm.document.tg_document_id][1]
+        and dm.document.size > 0
+        and described[dm.document.tg_document_id][2] is None
+    }
+    if wanted:
+        # By size alone, so the index on it is the one used (few files share
+        # an exact size; given the name and status too, SQLite may walk a
+        # whole status instead). The rest is checked here and by `_best_match`.
+        candidates = await s.execute(
+            select(Document).where(Document.size.in_({size for size, _ in wanted})).order_by(Document.id)
         )
+        for d in candidates.scalars():
+            if (d.size, d.normalized_name) in wanted:
+                same_name.setdefault((d.size, d.normalized_name), []).append(d)
+
+    outcomes: list[str] = []
+    placed: dict[int, Document] = {}  # msg id -> document, for appearances this batch adds
+    # New documents are numbered here, as SQLite would number them (this is
+    # the only connection that writes, and it holds the write lock): rows that
+    # come with their ids are inserted together, not one statement each.
+    next_id: int | None = None
+    for dm in batch:
+        info = dm.document
+        app = apps.get(dm.msg_id)
+        doc = docs.get(info.tg_document_id)
+        if doc is not None and (placed.get(dm.msg_id) is doc or (app is not None and app.document_id == doc.id)):
+            outcomes.append("known")
+            continue
+
+        if doc is not None:
+            outcome = "appearance"
+            # Rejected by another chat's filters, but this chat accepts it.
+            if doc.status == DocStatus.SKIPPED and (doc.last_error or "").startswith("filtered:"):
+                if filters.rejection(doc.ext, doc.size) is None:
+                    match = await find_name_size_match(s, doc.size, doc.normalized_name or "", doc.id)
+                    _apply(doc, decide(None, match, filters.auto_download))
+                    outcome = doc.status
+            # Listed from another chat, and this chat downloads automatically.
+            elif doc.status == DocStatus.AVAILABLE and filters.auto_download:
+                doc.status = DocStatus.PENDING
+                outcome = doc.status
+            _add_caption(doc, dm.caption)
+        else:
+            ext, normalized, rejection = described[info.tg_document_id]
+            key = (info.size, normalized)
+            match = None if rejection else _best_match(same_name.get(key, ()))
+            series_key, volume = parse_volume(normalized)
+            name = info.file_name or fallback_name(dm, ext)
+            if next_id is None:
+                next_id = (await s.execute(select(func.coalesce(func.max(Document.id), 0)))).scalar() + 1
+            doc = Document(
+                id=next_id,
+                tg_document_id=info.tg_document_id,
+                original_name=name,
+                normalized_name=normalized,
+                series_key=series_key,
+                volume=volume,
+                search_text=search_text(name, [dm.caption]),
+                ext=ext,
+                mime=info.mime,
+                size=info.size,
+                first_seen_at=utcnow(),
+                priority=0,
+                bytes_downloaded=0,
+                attempts=0,
+            )
+            next_id += 1
+            _apply(doc, decide(rejection, match, filters.auto_download))
+            s.add(doc)
+            docs[info.tg_document_id] = doc
+            if key in wanted:
+                same_name.setdefault(key, []).append(doc)
+            outcome = doc.status
+
+        if dm.msg_id in placed:
+            # The same message twice in one batch, carrying another file now.
+            placed[dm.msg_id] = doc
+            apps[dm.msg_id].caption = dm.caption
+        elif app is not None:
+            # The message was edited to carry a different file.
+            app.document_id = doc.id
+            app.caption = dm.caption
+        else:
+            apps[dm.msg_id] = Appearance(chat_id=chat.id, msg_id=dm.msg_id, posted_at=dm.date, caption=dm.caption)
+            placed[dm.msg_id] = doc
+        outcomes.append(outcome)
+
+    await s.flush()  # documents first: their posts refer to them
+    for msg_id, doc in placed.items():
+        apps[msg_id].document_id = doc.id
+        s.add(apps[msg_id])
     await s.flush()
-    return outcome
+    return outcomes
+
+
+async def record_message(s: AsyncSession, chat: Chat, dm: DocMessage, filters: Filters) -> str:
+    """`record_messages` for a single message."""
+    return (await record_messages(s, chat, [dm], filters))[0]
 
 
 async def ensure_chat(s: AsyncSession, info: DialogInfo, is_member: bool) -> Chat:
@@ -233,6 +419,13 @@ async def request_download(s: AsyncSession, doc_ids: list[int], *, to_front: boo
     content are redirected to their original."""
     result = RequestResult()
     top = (await s.execute(select(func.max(Document.priority)))).scalar() or 0
+    # Read in a few queries; `s.get` below then finds them in the session
+    # (which only keeps what something else still refers to, hence the list).
+    loaded = [
+        d
+        for chunk in _chunks(doc_ids)
+        for d in (await s.execute(select(Document).where(Document.id.in_(chunk)))).scalars()
+    ]
     seen: set[int] = set()
     for doc_id in doc_ids:
         doc = await s.get(Document, doc_id)
@@ -255,7 +448,24 @@ async def request_download(s: AsyncSession, doc_ids: list[int], *, to_front: boo
         doc.priority = top + 1 if to_front else 0
         result.queued += 1
     await s.flush()
+    del loaded
     return result
+
+
+async def request_chat_download(s: AsyncSession, chat_id: int) -> int:
+    """Queues every file of the chat that is only listed, in one statement
+    however many there are. Returns how many."""
+    res = await s.execute(
+        update(Document)
+        .where(
+            Document.status == DocStatus.AVAILABLE,
+            Document.blob_id.is_(None),
+            Document.id.in_(select(Appearance.document_id).where(Appearance.chat_id == chat_id)),
+        )
+        .values(status=DocStatus.PENDING, attempts=0, last_error=None, next_attempt_at=None, priority=0)
+        .execution_options(synchronize_session=False)
+    )
+    return res.rowcount or 0
 
 
 async def backfill_series(s: AsyncSession) -> int:

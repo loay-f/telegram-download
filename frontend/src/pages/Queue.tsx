@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { ApiError, api, post } from "../lib/api";
 import { NOUNS, bytes, count, dateTime, num } from "../lib/format";
 import { STATUS_LABEL, reasonText } from "../lib/labels";
-import { useLive } from "../lib/live";
+import { useLive, useThrottled } from "../lib/live";
 import { Alert, Button, ProgressBar, Spinner } from "../components/ui";
 
 interface Item {
@@ -53,8 +53,9 @@ export function QueuePage() {
     load();
   }, [load, revision]);
 
-  // Keep the waiting list fresh while downloads move through it.
-  const activeKey = status?.engine.active.map((a) => a.id).join(",");
+  // Keep the waiting list fresh while downloads move through it. Small files
+  // come and go several times a second; the list follows every few seconds.
+  const activeKey = useThrottled(status?.engine.active.map((a) => a.id).join(","), 3000);
   useEffect(() => {
     if (tab.key === "waiting") load();
   }, [activeKey]);
@@ -90,7 +91,7 @@ export function QueuePage() {
               setLimit(PAGE);
             }}
             className={`rounded-lg px-4 min-h-11 font-semibold border transition-colors ${
-              t.key === tab.key ? "bg-ink text-white border-ink" : "bg-white border-line hover:border-binding"
+              t.key === tab.key ? "bg-accent text-white border-accent" : "bg-white border-line hover:border-accent"
             }`}
           >
             {t.label}

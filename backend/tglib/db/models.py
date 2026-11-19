@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -49,6 +50,14 @@ class Chat(Base):
     # to `scan_resume_msg_id` are recorded, and it continues below that.
     scan_top_msg_id: Mapped[int | None] = mapped_column(BigInteger)
     scan_resume_msg_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Those three are for plain files. Photos and videos, and audio, are
+    # separate passes over the chat with positions of their own.
+    media_scanned_msg_id: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0", nullable=False)
+    media_top_msg_id: Mapped[int | None] = mapped_column(BigInteger)
+    media_resume_msg_id: Mapped[int | None] = mapped_column(BigInteger)
+    audio_scanned_msg_id: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0", nullable=False)
+    audio_top_msg_id: Mapped[int | None] = mapped_column(BigInteger)
+    audio_resume_msg_id: Mapped[int | None] = mapped_column(BigInteger)
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_scan_error: Mapped[str | None] = mapped_column(Text)
     allowed_exts: Mapped[str | None] = mapped_column(Text)
@@ -90,6 +99,10 @@ class Document(Base):
     # Multi-volume works: same series_key, different volume. '' = not a volume.
     series_key: Mapped[str | None] = mapped_column(Text)
     volume: Mapped[int | None] = mapped_column(Integer)
+    # What the library's search looks through: the name and the captions the
+    # file was posted with, folded (`catalog.search_text`). NULL = not
+    # computed yet (filled at startup).
+    search_text: Mapped[str | None] = mapped_column(Text)
     bytes_downloaded: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -100,7 +113,9 @@ class Document(Base):
     blob: Mapped[Blob | None] = relationship(lazy="raise")
 
     __table_args__ = (
-        Index("ix_documents_status_priority", "status", "priority"),
+        # The download queue in the order it is claimed, so taking the next
+        # file never sorts the whole queue.
+        Index("ix_documents_claim", "status", text("priority DESC"), "first_seen_at", "id"),
         Index("ix_documents_size", "size"),
         Index("ix_documents_normalized_name", "normalized_name"),
         Index("ix_documents_duplicate_of_id", "duplicate_of_id"),

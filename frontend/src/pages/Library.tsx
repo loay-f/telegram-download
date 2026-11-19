@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ApiError, api, post } from "../lib/api";
 import { NOUNS, bytes, count, date, num, stem } from "../lib/format";
+import { OPEN_LABEL, viewerFor } from "../lib/fileTypes";
 import { STATUS_LABEL, reasonText } from "../lib/labels";
-import { useLive } from "../lib/live";
+import { useLive, useRevision } from "../lib/live";
 import { Alert, Button, ProgressBar, Spinner } from "../components/ui";
 
 interface Appearance {
@@ -53,10 +54,17 @@ interface ChatCount {
 type View = "downloaded" | "available";
 
 const PAGE = 30;
-export const READABLE = new Set([".pdf", ".epub", ".txt"]);
+/** Pages fetched by one request when the list is brought up to date. */
+const PAGES_PER_REQUEST = 30;
+
+/** A work can move between pages while the list is being read; shown once. */
+function unique(works: Work[]): Work[] {
+  const seen = new Set<string>();
+  return works.filter((w) => !seen.has(w.key) && seen.add(w.key));
+}
 
 export function LibraryPage() {
-  const { revision } = useLive();
+  const revision = useRevision();
   const [sp, setSp] = useSearchParams();
   const view: View = sp.get("view") === "available" ? "available" : "downloaded";
   const chat = sp.get("chat") ?? "";
@@ -97,8 +105,8 @@ export function LibraryPage() {
   }, [revision]);
 
   const params = useCallback(
-    (p: number) => {
-      const s = new URLSearchParams({ view, page: String(p), page_size: String(PAGE), sort });
+    (p: number, size = PAGE) => {
+      const s = new URLSearchParams({ view, page: String(p), page_size: String(size), sort });
       if (query.trim()) s.set("q", query.trim());
       if (ext) s.set("ext", ext);
       if (chat) s.set("chat_id", chat);
@@ -109,28 +117,62 @@ export function LibraryPage() {
     [view, sort, query, ext, chat, from, to],
   );
 
-  const reload = useCallback(async () => {
-    try {
-      const r = await api<{ items: Work[]; total: number }>(`/api/library?${params(1)}`);
-      setWorks(r.items);
-      setTotal(r.total);
-      setPage(1);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : "تعذّر تحميل المكتبة.");
-    }
-  }, [params]);
+  const run = useRef(0); // only the latest request may show its answer
+  const shownPages = useRef(1);
+  shownPages.current = page;
+
+  /** Fetches the list. `keep`: everything shown stays shown, brought up to
+   * date (a download finished, a file was queued or deleted); otherwise it
+   * starts again from the first page (the filters changed). */
+  const reload = useCallback(
+    async (keep = false) => {
+      const mine = ++run.current;
+      const pages = keep ? shownPages.current : 1;
+      try {
+        // The pages shown are one stretch from the top: asked for in as few
+        // requests as hold them.
+        const requests = Math.ceil(pages / PAGES_PER_REQUEST);
+        const size = Math.ceil(pages / requests) * PAGE;
+        const got = await Promise.all(
+          Array.from({ length: requests }, (_, i) =>
+            api<{ items: Work[]; total: number }>(`/api/library?${params(i + 1, size)}`),
+          ),
+        );
+        if (mine !== run.current) return;
+        setWorks(unique(got.flatMap((r) => r.items)).slice(0, pages * PAGE));
+        setTotal(got[0].total);
+        setPage(pages);
+        setError(null);
+      } catch (e) {
+        if (mine !== run.current) return;
+        setError(e instanceof ApiError ? e.message : "تعذّر تحميل المكتبة.");
+      }
+    },
+    [params],
+  );
 
   useEffect(() => {
     reload();
-  }, [reload, revision]);
+  }, [reload]);
+
+  // Something changed in the background: the same list, up to date.
+  const seenRevision = useRef(revision);
+  useEffect(() => {
+    if (seenRevision.current === revision) return;
+    seenRevision.current = revision;
+    reload(true);
+  }, [revision, reload]);
 
   async function more() {
+    const mine = run.current;
     setLoadingMore(true);
     try {
       const r = await api<{ items: Work[] }>(`/api/library?${params(page + 1)}`);
-      setWorks((prev) => [...(prev ?? []), ...r.items]);
+      if (mine !== run.current) return; // the list was fetched again meanwhile
+      setWorks((prev) => unique([...(prev ?? []), ...r.items]));
       setPage(page + 1);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "تعذّر تحميل المزيد.");
     } finally {
       setLoadingMore(false);
     }
@@ -142,7 +184,7 @@ export function LibraryPage() {
       const r = await post<{ queued: number }>("/api/documents/download", { ids, to_front: toFront });
       setNotice(r.queued ? `أُضيف إلى قائمة التنزيل: ${count(r.queued, NOUNS.file)}.` : "هذه الملفات في القائمة بالفعل.");
       setSelected(new Set());
-      await reload();
+      await reload(true);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "تعذّر إضافة الملفات.");
     }
@@ -152,7 +194,7 @@ export function LibraryPage() {
     try {
       const r = await post<{ queued: number }>(`/api/chats/${chat}/download-all`);
       setNotice(`أُضيف إلى قائمة التنزيل: ${count(r.queued, NOUNS.file)}.`);
-      await reload();
+      await reload(true);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "تعذّر إضافة الملفات.");
     }
@@ -162,7 +204,7 @@ export function LibraryPage() {
     try {
       await api(`/api/library/${entry.id}`, { method: "DELETE" });
       setNotice(`حُذف «${entry.name}» من المكتبة والقرص.`);
-      await reload();
+      await reload(true);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "تعذّر الحذف.");
     }
@@ -187,7 +229,7 @@ export function LibraryPage() {
       <div role="tablist" className="flex flex-wrap gap-2">
         {(
           [
-            ["downloaded", "الكتب المنزّلة"],
+            ["downloaded", "الملفات المنزّلة"],
             ["available", "متاحة للتنزيل"],
           ] as const
         ).map(([key, label]) => (
@@ -197,7 +239,7 @@ export function LibraryPage() {
             aria-selected={view === key}
             onClick={() => setParam("view", key === "downloaded" ? "" : key)}
             className={`rounded-lg px-4 min-h-11 font-semibold border transition-colors ${
-              view === key ? "bg-ink text-white border-ink" : "bg-white border-line hover:border-binding"
+              view === key ? "bg-accent text-white border-accent" : "bg-white border-line hover:border-accent"
             }`}
           >
             {label}
@@ -245,9 +287,9 @@ export function LibraryPage() {
             type="search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="ابحث باسم الكتاب أو بكلمة من وصفه"
+            placeholder="ابحث باسم الملف أو بكلمة من وصفه"
             aria-label="بحث في المكتبة"
-            className="w-full rounded-lg border border-line bg-white px-4 min-h-13 text-lg focus:border-binding focus:outline-none focus:ring-2 focus:ring-binding/25"
+            className="w-full rounded-lg border border-line bg-white px-4 min-h-13 text-lg focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
           />
           <div className="flex flex-wrap items-center gap-3">
             <Button variant="quiet" aria-expanded={showFilters} onClick={() => setShowFilters(!showFilters)}>
@@ -265,7 +307,7 @@ export function LibraryPage() {
                 <option value="size">الأكبر حجماً</option>
               </select>
             </label>
-            <span className="text-ink-soft ms-auto">{works && count(total, NOUNS.book)}</span>
+            <span className="text-ink-soft ms-auto">{works && count(total, NOUNS.file)}</span>
           </div>
 
           {showFilters && (
@@ -367,7 +409,7 @@ function ChatLink({ active, onClick, title, n }: { active: boolean; onClick: () 
         onClick={onClick}
         aria-current={active ? "true" : undefined}
         className={`w-full flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-start transition-colors ${
-          active ? "bg-binding-tint text-binding-dark font-semibold" : "hover:bg-paper"
+          active ? "bg-accent-tint text-accent-strong font-semibold" : "hover:bg-canvas"
         }`}
       >
         <bdi className="truncate">{title}</bdi>
@@ -379,16 +421,16 @@ function ChatLink({ active, onClick, title, n }: { active: boolean; onClick: () 
 
 function EmptyState({ view, filtered }: { view: View; filtered: boolean }) {
   let text: React.ReactNode;
-  if (filtered) text = "لا توجد كتب تطابق البحث. جرّب كلمة أخرى أو أزل عوامل التصفية.";
+  if (filtered) text = "لا توجد ملفات تطابق البحث. جرّب كلمة أخرى أو أزل عوامل التصفية.";
   else if (view === "downloaded")
     text = (
       <>
-        لم تُنزّل كتباً بعد. اختر ما تريد من تبويب{" "}
-        <Link to="/library?view=available" className="text-binding underline underline-offset-4">
+        لم تُنزّل شيئاً بعد. اختر ما تريد من تبويب{" "}
+        <Link to="/library?view=available" className="text-accent underline underline-offset-4">
           «متاحة للتنزيل»
         </Link>{" "}
         أو من{" "}
-        <Link to="/search" className="text-binding underline underline-offset-4">
+        <Link to="/search" className="text-accent underline underline-offset-4">
           «البحث في تيليغرام»
         </Link>
         .
@@ -398,7 +440,7 @@ function EmptyState({ view, filtered }: { view: View; filtered: boolean }) {
     text = (
       <>
         لا توجد ملفات متاحة. فعّل متابعة محادثة من صفحة{" "}
-        <Link to="/chats" className="text-binding underline underline-offset-4">
+        <Link to="/chats" className="text-accent underline underline-offset-4">
           «المحادثات»
         </Link>{" "}
         ليفحصها البرنامج ويعرض ملفاتها هنا.
@@ -436,13 +478,13 @@ function Cover({ entry, view }: { entry: Entry; view: View }) {
         alt=""
         loading="lazy"
         onError={() => setFailed(true)}
-        className="w-14 h-[4.6rem] shrink-0 rounded-md border border-line object-cover object-top bg-paper"
+        className="w-14 h-[4.6rem] shrink-0 rounded-md border border-line object-cover object-top bg-canvas"
       />
     );
   }
   return (
     <span
-      className="w-14 h-[4.6rem] shrink-0 rounded-md bg-binding-tint grid place-items-center text-sm font-semibold text-binding-dark"
+      className="w-14 h-[4.6rem] shrink-0 rounded-md bg-accent-tint grid place-items-center text-sm font-semibold text-accent-strong"
       dir="ltr"
     >
       {badge}
@@ -489,7 +531,7 @@ function WorkRow({ work, view, selected, onToggle, onDownload, onDelete }: {
         </div>
       </div>
       {open && (
-        <ul className="mt-4 sm:ms-18 space-y-3 border-s-2 border-binding-tint ps-4">
+        <ul className="mt-4 sm:ms-18 space-y-3 border-s-2 border-accent-tint ps-4">
           {work.entries.map((e) => (
             <li key={e.id}>
               <EntryRow
@@ -521,10 +563,8 @@ function EntryRow({ entry: e, view, title, subtitle, selected, onToggle, onDownl
   onDelete: (e: Entry) => void;
   showCover?: boolean;
 }) {
-  const { status: live } = useLive();
   const [details, setDetails] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const progress = live?.engine.active.find((a) => a.id === e.id);
   const pickable = e.status === "available" || e.status === "failed";
   const chats = [...new Set(e.appearances.map((a) => a.chat_title ?? ""))];
 
@@ -537,7 +577,7 @@ function EntryRow({ entry: e, view, title, subtitle, selected, onToggle, onDownl
             aria-label={`تحديد ${e.name}`}
             checked={selected.has(e.id)}
             onChange={() => onToggle(e.id)}
-            className="mt-1.5 size-5 accent-binding"
+            className="mt-1.5 size-5 accent-accent"
           />
         )}
         {showCover && <Cover entry={e} view={view} />}
@@ -553,26 +593,22 @@ function EntryRow({ entry: e, view, title, subtitle, selected, onToggle, onDownl
           </p>
           {showCover && e.caption && <p className="mt-2 line-clamp-2 text-ink-soft">{e.caption}</p>}
           {e.status === "failed" && <p className="mt-1 text-sm text-danger">{reasonText(e.last_error)}</p>}
-          {(e.status === "downloading" || e.status === "pending") && (progress || e.bytes_downloaded > 0) && (
-            <div className="mt-2 max-w-md">
-              <ProgressBar value={progress?.done ?? e.bytes_downloaded} max={e.size} />
-            </div>
-          )}
+          {(e.status === "downloading" || e.status === "pending") && <EntryProgress entry={e} />}
         </div>
         <div className={`flex flex-wrap gap-2 basis-full sm:basis-auto sm:ps-0 ${showCover ? "ps-18" : ""}`}>
           {e.has_file ? (
             <>
-              {e.ext && READABLE.has(e.ext) && (
+              {viewerFor(e.ext) && (
                 <Link
                   to={`/read/${e.id}`}
-                  className="inline-flex items-center rounded-lg px-4 min-h-11 font-semibold bg-binding text-white hover:bg-binding-dark"
+                  className="inline-flex items-center rounded-lg px-4 min-h-11 font-semibold bg-accent text-white hover:bg-accent-strong"
                 >
-                  قراءة
+                  {OPEN_LABEL[viewerFor(e.ext)!]}
                 </Link>
               )}
               <a
                 href={`/api/files/${e.id}?download=true`}
-                className="inline-flex items-center rounded-lg px-4 min-h-11 font-semibold border border-line bg-white hover:border-binding hover:text-binding"
+                className="inline-flex items-center rounded-lg px-4 min-h-11 font-semibold border border-line bg-white hover:border-accent hover:text-accent"
               >
                 تنزيل إلى جهازي
               </a>
@@ -588,8 +624,8 @@ function EntryRow({ entry: e, view, title, subtitle, selected, onToggle, onDownl
       {details && (
         <div className="mt-4 ms-18 space-y-3 text-sm">
           {(e.copies ?? 1) > 1 && (
-            <p className="text-gilt">
-              وُجد هذا الكتاب {count(e.copies!, NOUNS.time)} بأسماء أو رفعات مختلفة، وحُفظت نسخة واحدة فقط.
+            <p className="text-warn">
+              وُجد هذا الملف {count(e.copies!, NOUNS.time)} بأسماء أو رفعات مختلفة، وحُفظت نسخة واحدة فقط.
             </p>
           )}
           {e.other_names && e.other_names.length > 0 && (
@@ -613,7 +649,7 @@ function EntryRow({ entry: e, view, title, subtitle, selected, onToggle, onDownl
                   {a.link && (
                     <>
                       {" "}
-                      <a href={a.link} target="_blank" rel="noopener noreferrer" className="text-binding underline underline-offset-4">
+                      <a href={a.link} target="_blank" rel="noopener noreferrer" className="text-accent underline underline-offset-4">
                         افتح الرسالة في تيليغرام
                       </a>
                     </>
@@ -642,6 +678,18 @@ function EntryRow({ entry: e, view, title, subtitle, selected, onToggle, onDownl
             ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** How far a queued file has got. Its own component, so only the rows of
+ * files on their way render again with every live snapshot. */
+function EntryProgress({ entry: e }: { entry: Entry }) {
+  const progress = useLive().status?.engine.active.find((a) => a.id === e.id);
+  if (!progress && e.bytes_downloaded <= 0) return null;
+  return (
+    <div className="mt-2 max-w-md">
+      <ProgressBar value={progress?.done ?? e.bytes_downloaded} max={e.size} />
     </div>
   );
 }
