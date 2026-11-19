@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom";
 import { ApiError, api, post } from "../lib/api";
 import { NOUNS, bytes, count, num } from "../lib/format";
-import { BackIcon, CheckIcon, CloseIcon, FolderIcon } from "../components/icons";
+import { CheckIcon, CloseIcon, FolderIcon } from "../components/icons";
 import { Alert, Button, IconButton, Panel, ProgressBar, Spinner } from "../components/ui";
 
 type Mode = "keep" | "copy" | "move";
@@ -49,11 +49,22 @@ const MODES: { key: Mode; label: string; detail: string }[] = [
   },
 ];
 
+/** Several pasted paths (one per line) each count; the quotes Windows'
+ * "Copy as path" adds are dropped. */
+function parsePaths(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim().replace(/^["']+|["']+$/g, "").trim())
+    .filter(Boolean);
+}
+
 export function ImportPage() {
   const [info, setInfo] = useState<ImportState | null>(null);
   const [folders, setFolders] = useState<string[]>([]);
+  const [typed, setTyped] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [pathError, setPathError] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("keep");
-  const [picking, setPicking] = useState(false);
   const [confirmMove, setConfirmMove] = useState(false);
   const [busy, setBusy] = useState<"add" | "check" | "stop" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +115,29 @@ export function ImportPage() {
     }
   }
 
+  /** Checks each pasted path opens, then puts it on the list. */
+  async function addPaths() {
+    const paths = parsePaths(typed);
+    if (!paths.length) return;
+    setAdding(true);
+    const added: string[] = [];
+    const bad: string[] = [];
+    const errors: string[] = [];
+    for (const p of paths) {
+      try {
+        const found = await api<{ path: string }>(`/api/import/folders?path=${encodeURIComponent(p)}`);
+        added.push(found.path);
+      } catch (e) {
+        bad.push(p);
+        errors.push(`${p} — ${e instanceof ApiError ? e.message : "تعذّر فتح المجلد."}`);
+      }
+    }
+    setFolders((fs) => [...fs, ...added.filter((p, i) => !fs.includes(p) && added.indexOf(p) === i)]);
+    setTyped(bad.join("\n"));
+    setPathError(errors.length ? errors.join("\n") : null);
+    setAdding(false);
+  }
+
   async function stop() {
     setBusy("stop");
     try {
@@ -151,17 +185,45 @@ export function ImportPage() {
             {info.in_docker && (
               <div className="mb-4">
                 <Alert kind="info">
-                  البرنامج يعمل داخل Docker ولا يرى إلا مجلداته. ضع الملفات داخل مجلد التخزين على جهازك، ثم اختر هنا «مجلد
-                  التخزين».
+                  البرنامج يعمل داخل Docker ولا يرى إلا مجلداته. ضع الملفات داخل مجلد التخزين على جهازك، ثم أضف هنا مسار
+                  مجلد التخزين.
                 </Alert>
               </div>
             )}
-            {folders.length === 0 ? (
-              <p className="mb-4 text-ink-soft">
-                اختر المجلد الذي فيه الملفات. يُضاف كل ما بداخله، وما في المجلدات التي بداخله أيضاً.
-              </p>
-            ) : (
-              <ul className="mb-4 space-y-2">
+            <label htmlFor="import-path" className="mb-1 block font-semibold">
+              الصق مسار المجلد ثم اضغط «أضف المسار»
+            </label>
+            <p className="mb-2 text-sm text-ink-soft">
+              يُضاف كل ما في المجلد، وما في المجلدات التي بداخله أيضاً. أضف مساراً بعد الآخر لأكثر من مجلد.
+            </p>
+            <form
+              className="flex flex-wrap gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                addPaths();
+              }}
+            >
+              <input
+                id="import-path"
+                dir="ltr"
+                spellCheck={false}
+                autoComplete="off"
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                placeholder="D:\Books"
+                className="min-h-11 min-w-0 flex-1 rounded-lg border border-line bg-white px-3 text-start"
+              />
+              <Button type="submit" variant="secondary" busy={adding} disabled={!typed.trim()}>
+                أضف المسار
+              </Button>
+            </form>
+            {pathError && (
+              <div className="mt-3 whitespace-pre-line">
+                <Alert>{pathError}</Alert>
+              </div>
+            )}
+            {folders.length > 0 && (
+              <ul className="mt-4 space-y-2">
                 {folders.map((f) => (
                   <li key={f} className="flex items-center gap-3 rounded-lg border border-line bg-canvas px-3 py-1.5">
                     <FolderIcon className="size-6 text-accent" />
@@ -175,10 +237,6 @@ export function ImportPage() {
                 ))}
               </ul>
             )}
-            <Button variant={folders.length ? "secondary" : "primary"} onClick={() => setPicking(true)}>
-              <FolderIcon className="size-5" />
-              {folders.length ? "أضف مجلداً آخر" : "اختر مجلداً"}
-            </Button>
           </Panel>
 
           <Panel title="٢. ماذا نفعل بالملفات؟">
@@ -212,7 +270,7 @@ export function ImportPage() {
             </p>
           </Panel>
 
-          <Panel title="٣. ابدأ">
+          <Panel title="٣. أضف كل المجلدات إلى المكتبة">
             {confirmMove ? (
               <div className="space-y-3">
                 <Alert kind="warn">
@@ -237,7 +295,7 @@ export function ImportPage() {
                     busy={busy === "add"}
                     onClick={() => (mode === "move" ? setConfirmMove(true) : start(false))}
                   >
-                    أضف إلى المكتبة
+                    أضف الكل إلى المكتبة
                   </Button>
                   <Button
                     variant="quiet"
@@ -250,7 +308,7 @@ export function ImportPage() {
                 </div>
                 <p className="mt-3 text-sm text-ink-soft">
                   {folders.length === 0
-                    ? "اختر مجلداً أولاً."
+                    ? "أضف مساراً واحداً على الأقل في الخطوة ١."
                     : "يقرأ البرنامج كل ملف ليتعرّف عليه، وقد يطول ذلك مع الملفات الكثيرة أو الكبيرة. يمكنك استخدام البرنامج في أثناء ذلك."}
                 </p>
               </>
@@ -260,16 +318,6 @@ export function ImportPage() {
       )}
 
       {error && <Alert>{error}</Alert>}
-
-      {picking && (
-        <FolderPicker
-          onClose={() => setPicking(false)}
-          onPick={(path) => {
-            setFolders((fs) => (fs.includes(path) ? fs : [...fs, path]));
-            setPicking(false);
-          }}
-        />
-      )}
     </div>
   );
 }
@@ -433,187 +481,5 @@ function Result({ job, busy, onAddNow, onClose }: {
         {check && <p className="text-sm text-ink-soft">كان هذا فحصاً فقط: لم يتغيّر شيء في المكتبة ولا في ملفاتك.</p>}
       </div>
     </Panel>
-  );
-}
-
-// ------------------------------------------------------------- folder picker
-interface Shortcut {
-  kind: "telegram" | "downloads" | "desktop" | "documents" | "storage" | "home" | "drive" | "root";
-  name: string;
-  path: string;
-}
-
-interface Listing {
-  path: string;
-  name: string;
-  parent: string | null;
-  dirs: { name: string; path: string }[];
-  files: number;
-}
-
-function shortcutLabel(s: Shortcut): string {
-  switch (s.kind) {
-    case "telegram":
-      return "تنزيلات تيليغرام (Telegram Desktop)";
-    case "downloads":
-      return "التنزيلات";
-    case "desktop":
-      return "سطح المكتب";
-    case "documents":
-      return "المستندات";
-    case "storage":
-      return "مجلد التخزين";
-    case "home":
-      return "مجلدي الشخصي";
-    case "root":
-      return "كل مجلدات الجهاز";
-    default:
-      return `القرص ${s.name}`;
-  }
-}
-
-/** The server lists its own folders: a browser cannot say where a folder is. */
-function FolderPicker({ onPick, onClose }: { onPick: (path: string) => void; onClose: () => void }) {
-  const [shortcuts, setShortcuts] = useState<Shortcut[] | null>(null);
-  const [here, setHere] = useState<Listing | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [typed, setTyped] = useState("");
-
-  useEffect(() => {
-    api<{ shortcuts: Shortcut[] }>("/api/import/folders")
-      .then((r) => setShortcuts(r.shortcuts))
-      .catch((e) => setError(e instanceof ApiError ? e.message : "تعذّر عرض المجلدات."));
-  }, []);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  async function open(path: string) {
-    setLoading(true);
-    setError(null);
-    try {
-      setHere(await api<Listing>(`/api/import/folders?path=${encodeURIComponent(path)}`));
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : "تعذّر فتح المجلد.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const row = "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-start transition-colors hover:bg-canvas";
-
-  return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-ink/45 p-4" onMouseDown={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="اختر المجلد الذي فيه الملفات"
-        onMouseDown={(e) => e.stopPropagation()}
-        className="flex max-h-[85vh] w-full max-w-xl flex-col rounded-2xl bg-white shadow-xl"
-      >
-        <header className="flex items-center gap-2 border-b border-line px-3 py-2">
-          {here ? (
-            <IconButton
-              label="رجوع"
-              onClick={() => {
-                setError(null);
-                if (here.parent) open(here.parent);
-                else setHere(null);
-              }}
-            >
-              <BackIcon className="size-5" />
-            </IconButton>
-          ) : (
-            <span className="size-11" />
-          )}
-          <div className="min-w-0 flex-1">
-            <h2 className="truncate text-lg font-semibold">{here ? <bdi>{here.name}</bdi> : "اختر المجلد الذي فيه الملفات"}</h2>
-            {here && (
-              <bdi dir="ltr" className="block truncate text-start text-sm text-ink-soft">
-                {here.path}
-              </bdi>
-            )}
-          </div>
-          <IconButton label="إغلاق" onClick={onClose}>
-            <CloseIcon className="size-5" />
-          </IconButton>
-        </header>
-
-        <div className="thin-scroll min-h-48 flex-1 overflow-y-auto p-2">
-          {error && (
-            <div className="p-2">
-              <Alert>{error}</Alert>
-            </div>
-          )}
-          {!here ? (
-            !shortcuts ? (
-              !error && <Spinner className="m-4 size-6 text-accent" />
-            ) : (
-              <>
-                {shortcuts.map((s) => (
-                  <button key={s.path} type="button" className={row} onClick={() => open(s.path)}>
-                    <FolderIcon className="size-6 text-accent" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block font-semibold">{shortcutLabel(s)}</span>
-                      <bdi dir="ltr" className="block truncate text-start text-sm text-ink-soft">
-                        {s.path}
-                      </bdi>
-                    </span>
-                  </button>
-                ))}
-                <form
-                  className="mt-2 border-t border-line p-3"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (typed.trim()) open(typed.trim());
-                  }}
-                >
-                  <label htmlFor="folder-path" className="mb-1 block text-sm font-semibold">
-                    أو الصق مسار المجلد هنا
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      id="folder-path"
-                      dir="ltr"
-                      value={typed}
-                      onChange={(e) => setTyped(e.target.value)}
-                      placeholder="D:\Books"
-                      className="min-h-11 min-w-0 flex-1 rounded-lg border border-line bg-white px-3"
-                    />
-                    <Button type="submit" variant="secondary" busy={loading} disabled={!typed.trim()}>
-                      افتح
-                    </Button>
-                  </div>
-                </form>
-              </>
-            )
-          ) : here.dirs.length === 0 ? (
-            <p className="p-4 text-ink-soft">لا توجد مجلدات أخرى بداخل هذا المجلد.</p>
-          ) : (
-            here.dirs.map((d) => (
-              <button key={d.path} type="button" className={row} disabled={loading} onClick={() => open(d.path)}>
-                <FolderIcon className="size-6 text-ink-soft" />
-                <bdi className="min-w-0 flex-1 truncate">{d.name}</bdi>
-              </button>
-            ))
-          )}
-        </div>
-
-        {here && (
-          <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-3">
-            <span className="text-sm text-ink-soft">
-              الملفات فيه مباشرةً: {num(here.files)} · المجلدات بداخله: {num(here.dirs.length)}
-            </span>
-            <Button onClick={() => onPick(here.path)} busy={loading}>
-              اختر هذا المجلد
-            </Button>
-          </footer>
-        )}
-      </div>
-    </div>
   );
 }

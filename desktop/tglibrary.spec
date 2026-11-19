@@ -23,6 +23,9 @@ hiddenimports = (
     + collect_submodules("telethon")
     + collect_submodules("alembic")
     + ["aiosqlite", "sqlalchemy.dialects.sqlite.aiosqlite", "sqlalchemy.dialects.sqlite.pysqlite"]
+    # tools/register_files.py is loaded from its file (`--register`, the import
+    # page), so what it imports is not seen by the analysis.
+    + ["argparse", "getpass", "http.server", "shlex", "sqlite3", "tempfile", "urllib.parse", "webbrowser"]
 )
 for pkg in ("pymupdf", "cryptg", "segno", "tzdata"):
     d, b, h = collect_all(pkg)

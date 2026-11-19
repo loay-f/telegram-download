@@ -911,10 +911,6 @@ PAGE = r"""<!doctype html>
   .ltr { direction:ltr; unicode-bidi:isolate; text-align:start; word-break:break-all; }
   code { display:block; direction:ltr; text-align:left; background:#17212b; color:#fff; border-radius:.5rem; padding:.6rem .8rem;
          margin:.5rem 0; font-size:.9rem; user-select:all; word-break:break-all; }
-  ul.folders { list-style:none; padding:0; margin:0 0 .9rem; }
-  ul.folders li { display:flex; align-items:center; gap:.6rem; background:var(--canvas); border:1px solid var(--line);
-                  border-radius:.625rem; padding:.35rem .75rem; margin-bottom:.5rem; }
-  ul.folders li span { flex:1; min-width:0; }
   .x { background:transparent; color:var(--soft); min-height:2.2rem; padding:0 .6rem; font-size:1.2rem; }
   .x:hover { background:var(--line); color:var(--ink); }
   .bar { height:.6rem; background:var(--tint); border-radius:1rem; overflow:hidden; }
@@ -923,17 +919,11 @@ PAGE = r"""<!doctype html>
   .fails { max-height:15rem; overflow:auto; font-size:.88rem; list-style:none; padding:0; }
   .fails li { margin-bottom:.5rem; } .fails em { color:var(--danger); font-style:normal; }
   summary { cursor:pointer; color:var(--accent); font-weight:600; }
-  .veil { position:fixed; inset:0; background:rgba(23,33,43,.45); display:grid; place-items:center; padding:1rem; }
-  .dialog { background:#fff; border-radius:1.1rem; width:100%; max-width:36rem; max-height:85vh; display:flex; flex-direction:column;
-            box-shadow:0 20px 50px rgba(0,0,0,.25); }
-  .dialog header, .dialog footer { display:flex; align-items:center; gap:.5rem; padding:.6rem .9rem; border-bottom:1px solid var(--line); }
-  .dialog footer { border-bottom:0; border-top:1px solid var(--line); justify-content:space-between; flex-wrap:wrap; }
-  .dialog header div { flex:1; min-width:0; } .dialog header strong { display:block; font-size:1.05rem; }
-  .dialog .list { overflow-y:auto; padding:.4rem; min-height:11rem; flex:1; }
-  .item { display:block; width:100%; text-align:start; background:transparent; color:var(--ink); font-weight:400;
-          padding:.5rem .75rem; min-height:0; }
-  .item:hover { background:var(--canvas); } .item b { display:block; }
-  .item::before { content:"📁"; margin-inline-end:.6rem; float:inline-start; }
+  ul.folders { list-style:none; padding:0; margin:.9rem 0 0; }
+  ul.folders:empty { display:none; }
+  ul.folders li { display:flex; align-items:center; gap:.6rem; background:var(--canvas); border:1px solid var(--line);
+                  border-radius:.625rem; padding:.35rem .75rem; margin-bottom:.5rem; }
+  ul.folders li span { flex:1; min-width:0; }
   input[type=text] { font:inherit; border:1px solid var(--line); border-radius:.625rem; min-height:2.75rem; padding:0 .75rem;
                      flex:1; min-width:0; direction:ltr; }
   .spin { display:inline-block; width:1.1rem; height:1.1rem; border:2px solid var(--accent); border-inline-end-color:transparent;
@@ -946,8 +936,28 @@ PAGE = r"""<!doctype html>
   <p class="soft">عندك ملفات نزّلتها من قبل؟ عرّف المكتبة بها حتى لا ينزّلها البرنامج مرة ثانية.
     الملفات تبقى في مكانها: لا يُنسخ ولا يُنقل ولا يُغيَّر منها شيء.</p>
   <div id="app"><p class="soft"><span class="spin"></span>جارٍ التحميل…</p></div>
+  <div id="form" hidden>
+    <section>
+      <h2><label for="path">١. الصق مسار المجلد ثم اضغط «أضف المسار»</label></h2>
+      <p class="soft small">يُسجَّل كل ما في المجلد، وما في المجلدات التي بداخله أيضاً. أضف مساراً بعد الآخر لأكثر من مجلد.</p>
+      <form class="row" onsubmit="event.preventDefault(); addPath()">
+        <input type="text" id="path" dir="ltr" spellcheck="false" autocomplete="off" placeholder="D:\Books">
+        <button id="addpath" class="second">أضف المسار</button>
+      </form>
+      <div id="patherror"></div>
+      <ul class="folders" id="list"></ul>
+    </section>
+    <section>
+      <h2>٢. أضف كل المجلدات إلى المكتبة</h2>
+      <div class="row">
+        <button id="go" class="big" disabled onclick="start(false)">أضف الكل إلى المكتبة</button>
+        <button id="check" class="quiet" disabled onclick="start(true)">افحص أولاً دون تغيير شيء</button>
+      </div>
+      <p class="soft small" id="hint"></p>
+      <p class="soft small">المكتبة: <span class="ltr" id="dbpath"></span></p>
+    </section>
+  </div>
 </main>
-<div id="picker"></div>
 <script>
 "use strict";
 const nf = new Intl.NumberFormat("ar-EG"), nf1 = new Intl.NumberFormat("ar-EG", {maximumFractionDigits: 1});
@@ -962,6 +972,12 @@ function files(n) {
   if (n === 2) return "ملفان";
   const m = n % 100;
   return num(n) + (m >= 3 && m <= 10 ? " ملفات" : " ملفاً");
+}
+function dirs(n) {
+  if (n === 1) return "مجلد واحد";
+  if (n === 2) return "مجلدان";
+  const m = n % 100;
+  return num(n) + (m >= 3 && m <= 10 ? " مجلدات" : " مجلداً");
 }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 async function call(path, body) {
@@ -994,12 +1010,12 @@ function render() {
   if (lost) h += '<div class="alert danger">توقف البرنامج. أغلق هذه النافذة وشغّله من جديد.</div>';
   if (state.problem) h += problem();
   if (running) h += progress(job);
-  else {
-    if (job && !hideResult) h += result(job);
-    if (!state.problem || state.problem === "not_writable") h += form();
-  }
+  else if (job && !hideResult) h += result(job);
   if (error) h += '<div class="alert danger">' + esc(error) + "</div>";
   app.innerHTML = h;
+  document.getElementById("form").hidden = running || (state.problem && state.problem !== "not_writable");
+  document.getElementById("dbpath").textContent = state.db || "";
+  buttons();
 }
 
 function problem() {
@@ -1019,22 +1035,54 @@ function problem() {
     '<p><button onclick="act(\'locations\', {db: document.getElementById(\'db\').value, storage: document.getElementById(\'storage\').value})">حفظ</button></p></section>';
 }
 
-function form() {
-  const none = folders.length === 0, blocked = state.problem === "not_writable";
-  let h = '<section><h2>١. أين الملفات؟</h2>';
-  if (none) h += '<p class="soft">اختر المجلد الذي فيه الملفات. يُسجَّل كل ما بداخله، وما في المجلدات التي بداخله أيضاً.</p>';
-  else h += '<ul class="folders">' + folders.map((f, i) =>
-    '<li>📁 <span class="ltr">' + esc(f) + '</span><button class="x" title="إزالة" aria-label="إزالة هذا المجلد" onclick="folders.splice(' + i + ',1);render()">×</button></li>').join("") + "</ul>";
-  h += '<button class="' + (none ? "" : "second") + '" onclick="openPicker()">' + (none ? "اختر مجلداً" : "أضف مجلداً آخر") + "</button></section>";
-  h += '<section><h2>٢. ابدأ</h2><div class="row">' +
-    '<button class="big" ' + (none || blocked ? "disabled" : "") + ' onclick="start(false)">أضف إلى المكتبة</button>' +
-    '<button class="quiet" ' + (none ? "disabled" : "") + ' onclick="start(true)">افحص أولاً دون تغيير شيء</button></div>' +
-    '<p class="soft small">' + (none ? "اختر مجلداً أولاً." :
-      "يقرأ البرنامج كل ملف ليتعرّف عليه، وقد يطول ذلك مع الملفات الكثيرة أو الكبيرة. اترك هذه النافذة مفتوحة حتى ينتهي.") + "</p>" +
-    '<p class="soft small">المكتبة: <span class="ltr">' + esc(state.db) + "</span></p></section>";
-  return h;
+// The form is not redrawn with the rest (that happens every second), so what
+// is being typed in it stays put; it changes only when a path is added or
+// removed, and its buttons follow the state.
+const pathBox = document.getElementById("path"), listEl = document.getElementById("list");
+// Several pasted paths (one per line) each count; quotes from Windows'
+// "Copy as path" are dropped.
+function parsePaths(text) {
+  return text.split(/\r?\n/).map(l => l.trim().replace(/^["']+|["']+$/g, "").trim()).filter(Boolean);
 }
-function start(check, from) { act("start", {folders: from || folders, check_only: check}); window.scrollTo(0, 0); }
+function showPathError(text) {
+  document.getElementById("patherror").innerHTML = text ? '<div class="alert danger">' + esc(text) + "</div>" : "";
+}
+async function addPath() {
+  const paths = parsePaths(pathBox.value);
+  if (!paths.length) { pathBox.focus(); return; }
+  const button = document.getElementById("addpath");
+  button.disabled = true;
+  const bad = [];
+  for (const p of paths) {
+    try {
+      const found = await call("folders?path=" + encodeURIComponent(p));  // checks that it opens
+      if (!folders.includes(found.path)) folders.push(found.path);
+    } catch (e) { bad.push(p + " — " + e.message); }
+  }
+  button.disabled = false;
+  pathBox.value = bad.length ? bad.map(b => b.split(" — ")[0]).join("\n") : "";
+  showPathError(bad.join("\n"));
+  drawList();
+  pathBox.focus();
+}
+function removePath(i) { folders.splice(i, 1); drawList(); }
+function drawList() {
+  listEl.innerHTML = folders.map((f, i) =>
+    '<li>📁 <span class="ltr">' + esc(f) + '</span><button class="x" title="إزالة" aria-label="إزالة هذا المجلد" onclick="removePath(' + i + ')">×</button></li>').join("");
+  buttons();
+}
+function buttons() {
+  const none = folders.length === 0;
+  document.getElementById("go").disabled = none || (state && state.problem === "not_writable");
+  document.getElementById("check").disabled = none;
+  document.getElementById("hint").textContent = none ? "أضف مساراً واحداً على الأقل في الخطوة ١." :
+    "في القائمة " + dirs(folders.length) + ". يقرأ البرنامج كل ملف ليتعرّف عليه، وقد يطول ذلك مع الملفات الكثيرة أو الكبيرة. اترك هذه النافذة مفتوحة حتى ينتهي.";
+}
+function start(check, from) {
+  if (!from && !folders.length) return;
+  act("start", {folders: from || folders, check_only: check});
+  window.scrollTo(0, 0);
+}
 
 function progress(job) {
   const added = job.counts.new + job.counts.linked;
@@ -1084,46 +1132,6 @@ function result(job) {
   return h + "</section>";
 }
 
-// ---- folder picker: this program lists the computer's folders
-const LABELS = {telegram: "تنزيلات تيليغرام (Telegram Desktop)", downloads: "التنزيلات", desktop: "سطح المكتب",
-  documents: "المستندات", storage: "مجلد التخزين", home: "مجلدي الشخصي", root: "كل مجلدات الجهاز"};
-const picker = document.getElementById("picker");
-let here = null, places = null, pickError = "";
-async function openPicker() {
-  here = null; pickError = "";
-  try { places = (await call("folders")).shortcuts; } catch (e) { pickError = e.message; places = []; }
-  drawPicker();
-}
-async function go(path) {
-  pickError = "";
-  try { here = await call("folders?path=" + encodeURIComponent(path)); } catch (e) { pickError = e.message; }
-  drawPicker();
-}
-function closePicker() { picker.innerHTML = ""; }
-function pick() { if (!folders.includes(here.path)) folders.push(here.path); closePicker(); render(); }
-function drawPicker() {
-  let h = '<div class="veil" onmousedown="if(event.target===this)closePicker()"><div class="dialog" role="dialog" aria-modal="true" aria-label="اختر المجلد الذي فيه الملفات"><header>';
-  if (here) h += '<button class="x" title="رجوع" aria-label="رجوع" onclick="back()">→</button><div><strong><bdi>' + esc(here.name) +
-    '</bdi></strong><span class="ltr soft small">' + esc(here.path) + "</span></div>";
-  else h += "<div><strong>اختر المجلد الذي فيه الملفات</strong></div>";
-  h += '<button class="x" title="إغلاق" aria-label="إغلاق" onclick="closePicker()">×</button></header><div class="list">';
-  if (pickError) h += '<div class="alert danger">' + esc(pickError) + "</div>";
-  if (!here) {
-    h += places.map((s, i) => '<button class="item" onclick="go(places[' + i + '].path)"><b>' +
-      esc(LABELS[s.kind] || "القرص " + s.name) + '</b><span class="ltr soft small">' + esc(s.path) + "</span></button>").join("");
-    h += '<form style="border-top:1px solid var(--line);margin-top:.4rem;padding:.75rem" onsubmit="event.preventDefault();const v=this.p.value.trim();if(v)go(v)">' +
-      '<label class="small" for="p"><b>أو الصق مسار المجلد هنا</b></label><div class="row"><input type="text" id="p" name="p" placeholder="D:\\Books">' +
-      '<button class="second">افتح</button></div></form>';
-  } else if (!here.dirs.length) h += '<p class="soft" style="padding:.75rem">لا توجد مجلدات أخرى بداخل هذا المجلد.</p>';
-  else h += here.dirs.map((d, i) => '<button class="item" onclick="go(here.dirs[' + i + '].path)"><bdi>' + esc(d.name) + "</bdi></button>").join("");
-  h += "</div>";
-  if (here) h += '<footer><span class="soft small">الملفات فيه مباشرةً: ' + num(here.files) + " · المجلدات بداخله: " + num(here.dirs.length) +
-    '</span><button onclick="pick()">اختر هذا المجلد</button></footer>';
-  picker.innerHTML = h + "</div></div>";
-}
-function back() { if (here.parent) go(here.parent); else { here = null; pickError = ""; drawPicker(); } }
-addEventListener("keydown", e => { if (e.key === "Escape") closePicker(); });
-
 // ---- keep in step with the program; tell it when the window goes away
 let first = true;
 (async function loop() {
@@ -1131,7 +1139,7 @@ let first = true;
   if (first && state) {
     first = false;
     const j = state.job;
-    if (j && (j.state !== "done" || j.check_only)) { folders = j.folders.slice(); render(); }
+    if (j && (j.state !== "done" || j.check_only)) { folders = j.folders.slice(); drawList(); render(); }
   }
   setTimeout(loop, 1000);
 })();
@@ -1189,8 +1197,11 @@ class Window:
             problem = self.problem()
             if problem in ("no_database", "no_storage") or (problem and not check_only):
                 raise FolderError(problem, START_ERRORS.get(problem, START_ERRORS["no_permission"]))
-            if not folders or not all(isinstance(f, str) and Path(f).is_absolute() and _is_dir(Path(f)) for f in folders):
-                raise FolderError("not_found", "اختر مجلداً موجوداً.")
+            if not folders:
+                raise FolderError("not_found", "أضف مسار مجلد أولاً.")
+            for f in folders:
+                if not (isinstance(f, str) and Path(f).is_absolute() and _is_dir(Path(f))):
+                    raise FolderError("not_found", "لم نجد هذا المجلد: %s — انسخ مساره الكامل، مثل D:\\Books" % f)
             self.job = Job(folders, "keep", bool(check_only))
             # live: the app may be running on the same database.
             self.thread = threading.Thread(target=run_job, args=(self.job, self.db, self.storage), daemon=True)

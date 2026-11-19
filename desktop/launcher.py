@@ -11,6 +11,8 @@ Windows 10/11). No Docker, Python or command line is needed by the user.
   through a random per-launch link (/api/auth/desktop), so the user never types it.
 - Closing the app window stops the server (downloads resume on the next start).
 - Starting the exe again while it is running just opens another window.
+- `TGLibrary.exe --register` opens the window that adds files already on this
+  computer to the library (tools/register_files.py).
 """
 
 from __future__ import annotations
@@ -48,11 +50,13 @@ if FROZEN:
     BUNDLE = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
     FRONTEND_DIR = BUNDLE / "frontend" / "dist"
     ICON = BUNDLE / "icon.ico"
+    REGISTER_TOOL = BUNDLE / "tools" / "register_files.py"
 else:
     REPO = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(REPO / "backend"))
     FRONTEND_DIR = REPO / "frontend" / "dist"
     ICON = Path(__file__).with_name("icon.ico")
+    REGISTER_TOOL = REPO / "tools" / "register_files.py"
 
 log = logging.getLogger("launcher")
 
@@ -381,8 +385,22 @@ def start_server(cfg: dict, port: int, token: str):
     return server, thread
 
 
+def run_register_window() -> int:
+    """`TGLibrary.exe --register`: the window that adds files already on this
+    computer (tools/register_files.py). It finds the library on its own and
+    may be used while the app is running."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("register_files", REGISTER_TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.main([])
+
+
 def main() -> int:
     _setup_launcher_logging()
+    if "--register" in sys.argv:
+        return run_register_window()
     force_setup = "--setup" in sys.argv
 
     if _already_running():
