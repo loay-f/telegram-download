@@ -4,7 +4,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, select
 
 from tglib.db.models import Appearance, Blob, Document, DocStatus
 from tglib.db.session import Database
@@ -110,7 +110,11 @@ class ChatCounts:
             return self._value
 
     async def _compute(self) -> dict[int, ChatCount]:
-        downloaded = case((Document.status.in_((DocStatus.DONE, DocStatus.DUPLICATE)), 1), else_=0)
+        # A duplicate counts only once its original is on disk (it then shares its blob).
+        downloaded = case(
+            (and_(Document.status.in_((DocStatus.DONE, DocStatus.DUPLICATE)), Document.blob_id.is_not(None)), 1),
+            else_=0,
+        )
         pending = case((Document.status.in_((DocStatus.PENDING, DocStatus.DOWNLOADING)), 1), else_=0)
         available = case((Document.status == DocStatus.AVAILABLE, 1), else_=0)
         async with self._db.read() as s:

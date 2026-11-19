@@ -24,7 +24,7 @@ from fake_telegram import FakeFile, FakeGateway
 from helpers import all_docs, running_container, sync_chats, track
 from test_auth import login, wait_for_state
 from test_chats_api import wait_until
-from test_download import all_settled, wait_for
+from test_download import all_settled, start_engine, wait_for
 
 
 @pytest.fixture(autouse=True)
@@ -179,6 +179,24 @@ async def test_chat_counters_are_kept_until_something_changes(settings):
         await ctx.engine.request([doc.id])
         counts = await ctx.chat_counts.get()
         assert (counts[-1].available, counts[-1].pending) == (1, 1)
+
+
+async def test_a_repost_counts_as_downloaded_only_once_its_original_is(settings):
+    gw = FakeGateway()
+    gw.add_chat(-1, "A")
+    gw.post(-1, 1, FakeFile(1, "كتاب.pdf", b"a" * 100))
+    gw.post(-1, 2, FakeFile(2, "كتاب.pdf", b"b" * 100))  # same name and size: a repost
+    async with running_container(settings, gw) as ctx:
+        await track(ctx, -1, auto_download=False)
+        await ctx.scanner.scan(-1)
+        assert {d.status for d in await all_docs(ctx)} == {DocStatus.AVAILABLE, DocStatus.DUPLICATE}
+        counts = await ctx.chat_counts.get()
+        assert (counts[-1].files, counts[-1].downloaded, counts[-1].available) == (2, 0, 1)
+        assert await ctx.engine.request_chat(-1) == 1
+        await start_engine(ctx)
+        await wait_for(all_settled(ctx))
+        counts = await ctx.chat_counts.get()
+        assert (counts[-1].downloaded, counts[-1].stored) == (2, 1)
 
 
 NAMES = ["الأغاني", "البيان والتبيين", "الكامل", "العقد الفريد", "أدب الكاتب"]  # five works, no volumes
